@@ -1,0 +1,3299 @@
+///////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////
+///
+/// David Johnston's auto-tweener and general JSFL library v2.6
+/// http://blog.pinkandaint.com/
+/// Last modified September 22nd 2025
+///
+/// Automatically tweens all selected elements so that they're between their current position
+/// and the position of the same object in the next frame.  Only works if the reflectivity of
+/// the symbol doesn't change between keyframes.  Groups will be tweened to a group with the
+/// same height and width when the transform is removed.  Thus, it'll only work if the transform
+/// hasn't been reset (by editing the group or ungrouping and regrouping).  Symbol instances
+/// will be set to have the same start frame as the destination instance (only if the source 
+/// instance is set to "single frame").
+///
+/// v2.6    Expanded the functionality of Profiler to visually show the relative 
+///         length of the delta between marks.       
+/// v2.5:   Added the ability to tween unclosed raw shapes
+/// v2.4:	Added in weighted matching criteria when matching symbols between two frames.
+///			This makes the symbols match better when, for instance, there's more than one
+///			of a given symbol on the stage.
+/// v2.3:   Upped the version to account for various bugfixes and minor tweaks.
+/// v2.2.4: changed several functions to use local counter variables for "for" loops, to 
+///         prevent problems when a calling command uses the same variable in its own loops.
+/// v2.2.3: Fixed a bug where it was selecting the shape hint on the wrong frame for a shape
+///         tween where you're not also tweening the hint.
+/// v2.2.2: fixed a bug that caused timeline view changes when working with a long timeline
+/// v2.2.1: fixed a bug in shape tweening that caused selection weirdness and prevented it
+///         working when trying to tween on an existing keyframe.
+///
+/// New to version 2: now you can auto-tween raw shapes!  In order to make it work you have
+/// to have a symbol whose library name is _shape_hint and have a copy of it in the same
+/// layer and frame as the shape.  The vertex on the shape that's closest to the shape hint
+/// symbol will be seen as the "first" vertex.  The tween will be done under the assumption
+/// that the hinted vertices of the two shapes are the vertices that correspond to each other.
+/// The rest of the vertices will be matched consecutively around the shapes.  This means that
+/// the tween will only work smoothly if both shapes have the same number of vertices.
+///
+///////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// CONST
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+fl.runScript( fl.configURI + "Commands/Art brush.include" );
+
+var DEBUG = true;
+
+// How much variance (in pixels) will be tolerated in matching shapes based on their dimensions
+var SHAPE_SIZE_TOLERANCE = 0.3;
+
+// How far apart do the vertices need to be when creating a non-one-to-one shape 
+// tween to justify adding the new vertex
+var SHAPE_TWEEN_INDEX_THRESHOLD = 1e-5;
+
+var EMPTY_FILL = {style: "noFill"};
+
+// The name of the shape hint symbol
+var SHAPE_HINT_NAME_PREFIX = "_shape_hint";
+var SHAPE_HINT_NAME_SEPARATOR = "_";
+
+var MAX_COMPOUND_EDGE_RECURSION = 3 // max number of recursions in makeCompoundEdge()
+
+var PATH_PRECISION = 5; // The precision of vertex coords to send to Flash's path construction function
+
+if(DEBUG)
+	fl.outputPanel.clear();
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// coords_toString = function(coords)
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+coords_toString = function(coords)
+{
+	if(coords !== undefined)
+		return "" + coords.x + ", " + coords.y;
+	else return "undefined";
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Class ProgBar
+//
+// A class for displaying a progress bar (0 to 100%)
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+function ProgBar(x, y)
+{
+	if(!x && !y)
+	{
+		x = y = 0;
+	}
+	//fl.trace("progbar at " + x + ", " + y);
+	this.setLocation(x,y);
+	fl.drawingLayer.beginDraw(true);
+}
+
+ProgBar.prototype.end = function()
+{
+	fl.drawingLayer.beginFrame();  // Clear the drawing
+	fl.drawingLayer.endDraw();
+}
+
+ProgBar.prototype.setLocation = function(x, y)
+{
+	this.center_x = x;
+	this.center_y = y;
+	this.scale = 1 / fl.getDocumentDOM().zoomFactor;
+}
+
+ProgBar.prototype.drawRect = function(x1, y1, x2, y2)
+{
+	var n;
+	var start;
+	var end;
+	if(Math.abs(x1 - x2) > Math.abs(y1 - y2))
+	{
+		// X is bigger than y, so iterate over y
+		start = Math.min(y1, y2);
+		end = Math.max(y1, y2);
+		for(n = start; n < end; n += this.scale)
+		{
+			fl.drawingLayer.moveTo(x1, n);
+			fl.drawingLayer.lineTo(x2, n);
+		}
+	}
+	else
+	{
+		// Y is bigger than X, so iterate over X
+		start = Math.min(x1, x2);
+		end = Math.max(x1, x2);
+		for(n = start; n < end; n += this.scale)
+		{
+			fl.drawingLayer.moveTo(n, y1);
+			fl.drawingLayer.lineTo(n, y2);
+		}
+	}
+
+}
+
+
+ProgBar.prototype.setProgress = function(newProg)
+{
+	// First make sure the new progress percentage is within range: 0 <= prog <= 1
+	if(newProg > 1)
+		newProg = 1;
+	else if (newProg < 0)
+		newProg = 0;
+	
+	var invViewMatrix = fl.Math.invertMatrix(doc.viewMatrix);
+	var viewCenter = apply_transform(invViewMatrix, {x:this.center_x, y:this.center_y});
+	//fl.trace("Original location: " + this.center_x + ", " + this.center_y + "; new location: " + viewCenter.x + ", " + viewCenter.y);
+		
+	//fl.trace("progress: " + (newProg * 100.0) + "%");
+
+	var PROG_WIDTH = 200;
+	var PROG_HEIGHT = 10;
+
+	fl.drawingLayer.beginFrame();
+	fl.drawingLayer.setColor(0xffffff);  // white
+	fl.drawingLayer.moveTo(viewCenter.x - this.scale * (PROG_WIDTH + 1), viewCenter.y - this.scale * (PROG_HEIGHT + 1));
+	fl.drawingLayer.lineTo(viewCenter.x - this.scale * (PROG_WIDTH + 1), viewCenter.y + this.scale * (PROG_HEIGHT + 1));
+	fl.drawingLayer.lineTo(viewCenter.x + this.scale * (PROG_WIDTH + 1), viewCenter.y + this.scale * (PROG_HEIGHT + 1));
+	fl.drawingLayer.lineTo(viewCenter.x + this.scale * (PROG_WIDTH + 1), viewCenter.y - this.scale * (PROG_HEIGHT + 1));
+	fl.drawingLayer.lineTo(viewCenter.x - this.scale * (PROG_WIDTH + 1), viewCenter.y - this.scale * (PROG_HEIGHT + 1));
+	fl.drawingLayer.setColor(0x000000);  // black
+	fl.drawingLayer.moveTo(viewCenter.x - this.scale * (PROG_WIDTH + 2), viewCenter.y - this.scale * (PROG_HEIGHT + 2));
+	fl.drawingLayer.lineTo(viewCenter.x - this.scale * (PROG_WIDTH + 2), viewCenter.y + this.scale * (PROG_HEIGHT + 2));
+	fl.drawingLayer.lineTo(viewCenter.x + this.scale * (PROG_WIDTH + 2), viewCenter.y + this.scale * (PROG_HEIGHT + 2));
+	fl.drawingLayer.lineTo(viewCenter.x + this.scale * (PROG_WIDTH + 2), viewCenter.y - this.scale * (PROG_HEIGHT + 2));
+	fl.drawingLayer.lineTo(viewCenter.x - this.scale * (PROG_WIDTH + 2), viewCenter.y - this.scale * (PROG_HEIGHT + 2));
+	
+	fl.drawingLayer.setColor(0x0000ff);  // blue
+
+	var START_X = viewCenter.x - (this.scale * PROG_WIDTH);
+	this.drawRect(START_X                                        , viewCenter.y - this.scale * PROG_HEIGHT,
+	              START_X + this.scale * PROG_WIDTH * 2 * newProg, viewCenter.y + this.scale * PROG_HEIGHT);
+
+	fl.drawingLayer.endFrame();
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Class profiler()
+//
+// A class for profiling the performance of code.  Create an instance and it'll start its timer.
+// Call profiler.mark() and it'll mark a "lap time" with a label.  Call toString() to create a 
+// nice print-out of all the marks so far
+// 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+function Profiler()
+{
+    this.times = [];
+    this.spacerMultiplier = 20;
+    this.spacerChar = "▓";
+    this.maxDelta = 0;
+
+    var date_obj = new Date();
+
+    this.times[0] = {time: date_obj.getTime(), delta: 0, text: ""};
+}
+
+Profiler.prototype.toString = function()
+{
+    retval = "Start: " + this.times[0].time + "\n";
+
+    var x;
+    for (x = 1; x < this.times.length; x++)
+    {
+        var thisRecord = this.times[x];
+        var timeFromStart = thisRecord.time - this.times[0].time;
+        var deltaNormalized = Math.round(this.times[x].delta / this.maxDelta * this.spacerMultiplier);
+        //fl.trace("This record: time = " + thisRecord.time + ", delta = " + thisRecord.delta + ", text = " + thisRecord.text);
+        //fl.trace("Array length = " + (deltaNormalized + 1));
+        var spacer = new Array(Math.round(deltaNormalized + 1)).join( this.spacerChar )
+        if(Math.round(deltaNormalized) === 0)
+            spacer = "|";
+        retval = retval.concat((timeFromStart/1000).toFixed(3) + " " + spacer + " " + thisRecord.text + "\n");
+    }
+        
+    return retval;
+}
+
+Profiler.prototype.mark = function(id_string)
+{
+    var timeRecord = new Object;
+    var date_obj = new Date();
+    timeRecord.time = date_obj.getTime();
+    timeRecord.delta = timeRecord.time  - this.times[this.times.length - 1].time;
+    timeRecord.text = id_string;
+
+    //fl.trace("Delta = " + timeRecord.delta + ", maxDelta = " + this.maxDelta + ", Time = " + timeRecord.time);
+    
+    // Keep track of the biggest time delta 
+    if(this.maxDelta < timeRecord.delta)
+        this.maxDelta = timeRecord.delta;
+    
+    this.times.push(timeRecord);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Class transform_components(source_matrix)
+//
+// Holds the extracted fransform elements (scale, skew, and translation).
+// The constructor extracts the transform elements from a matrix.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+transform_components = function(source_matrix_param)
+{
+	if(undefined === source_matrix_param)
+	{
+		this.scale_x = this.scale_y = 1;
+		this.skew_x = this.skew_y = 0;
+		this.tx = this.ty = 0;
+	}
+	else
+	{
+		var source_matrix = {};
+		
+		source_matrix.a  = source_matrix_param.a;
+		source_matrix.b  = source_matrix_param.b;
+		source_matrix.c  = source_matrix_param.c;
+		source_matrix.d  = source_matrix_param.d;
+		source_matrix.tx = source_matrix_param.tx;
+		source_matrix.ty = source_matrix_param.ty;
+
+		// Determine the scale of the matrix
+		this.scale_x = Math.sqrt(source_matrix.a * source_matrix.a + source_matrix.b * source_matrix.b);
+		this.scale_y = Math.sqrt(source_matrix.c * source_matrix.c + source_matrix.d * source_matrix.d);
+	
+		// Determine the rotation of the first item
+		if(this.scale_x !== 0)
+		{
+			source_matrix.a /= this.scale_x;
+			source_matrix.c /= this.scale_x;
+		}
+		if(this.scale_y !== 0)
+		{
+			source_matrix.b /= this.scale_y;
+			source_matrix.d /= this.scale_y;
+		}
+		
+		// Now source_matrix contains the rotation/skew matrix plus translation
+	
+		this.skew_x = Math.acos(source_matrix.d);
+		this.skew_y = Math.acos(source_matrix.a);
+		
+		if(source_matrix.b < 0)
+			this.skew_y = -this.skew_y;
+		if(source_matrix.c > 0)
+			this.skew_x = -this.skew_x;
+			
+		this.tx = source_matrix.tx;
+		this.ty = source_matrix.ty;
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+transform_components.prototype.toString = function()
+{
+	return   "skew:      " + (this.skew_x / Math.PI * 180) + ", " + (this.skew_y / Math.PI * 180) + " degrees" +
+	       "\nscale:     " + this.scale_x + ", " + this.scale_y +
+	       "\ntranslate: " + this.tx + ", " + this.ty;
+}
+
+transform_components.prototype.is_reflected = function()
+{
+	var retval = Math.abs(this.skew_x - this.skew_y) <= Math.PI / 2;
+	retval = retval || (Math.abs(this.skew_x - this.skew_y) >= 3 * Math.PI / 2);
+	
+	// Oops. That math gave us the oposite result than what we want.
+	return !retval;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// transform_components.prototype.tween = function(tweener, dist)
+//
+// Changes the transform to be a tween between itself and another transform_components object.
+// dist is the percentage movement between the two extremes (0..1)
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+transform_components.prototype.tween = function(tweener, dist)
+{
+	this.scale_x += (tweener.scale_x - this.scale_x) * dist;
+	this.scale_y += (tweener.scale_y - this.scale_y) * dist;
+	
+	// Calculating skew is a little harder, since we have to account for crossing the threshold at 180 degrees
+	
+	var abs_x = Math.abs(this.skew_x - tweener.skew_x);
+	var crosswise_dist_x = (2 * Math.PI - abs_x);
+	if(abs_x < crosswise_dist_x)
+		this.skew_x += (tweener.skew_x - this.skew_x) * dist;
+	else
+	{
+		if(this.skew_x > 0)
+		{
+			this.skew_x += crosswise_dist_x * dist;
+			if(this.skew_x > Math.PI)
+				this.skew_x -= 2 * Math.PI;
+		}
+		else
+		{
+			this.skew_x -= crosswise_dist_x * dist;
+			if(this.skew_x < -Math.PI)
+				this.skew_x += 2 * Math.PI;
+		}
+	}
+	
+	var abs_y = Math.abs(this.skew_y - tweener.skew_y);
+	var crosswise_dist_y = (2 * Math.PI - abs_y);
+	if(abs_y < crosswise_dist_y)
+		this.skew_y += (tweener.skew_y - this.skew_y) * dist;
+	else
+	{
+		if(this.skew_y > 0)
+		{
+			this.skew_y += crosswise_dist_y * dist;
+			if(this.skew_y > Math.PI)
+				this.skew_y -= 2 * Math.PI;
+		}
+		else
+		{
+			this.skew_y -= crosswise_dist_y * dist;
+			if(this.skew_y < -Math.PI)
+				this.skew_y += 2 * Math.PI;
+		}
+	}
+
+	//fl.trace("start position: " + this.tx + ", " + this.ty);
+	//fl.trace("end position:   " + tweener.tx + ", " + tweener.ty);
+	//fl.trace("" + (dist * 100) + "% change: " + ((tweener.tx - this.tx) * dist) + ", " + ((tweener.ty - this.ty) * dist));
+
+	this.tx += (tweener.tx - this.tx) * dist;
+	this.ty += (tweener.ty - this.ty) * dist;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// transform_components.prototype.to_matrix = function()
+//
+// Returns a matrix with the same components as the transform_components object
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+transform_components.prototype.to_matrix = function()
+{
+	// Create the rotation/skew matrix
+	var return_matrix = {a:Math.cos(this.skew_y), b:Math.sin(this.skew_y), c:-Math.sin(this.skew_x), d:Math.cos(this.skew_x), tx:this.tx, ty:this.ty};
+	
+	return_matrix.a *= this.scale_x;
+	return_matrix.b *= this.scale_x;
+	return_matrix.c *= this.scale_y;
+	return_matrix.d *= this.scale_y;
+	
+	return return_matrix;
+}
+
+/////////////////////////////////////////////////////////////////////////
+// function object_reflected(obj)
+//
+// Returns true if obj's transform is reflected
+/////////////////////////////////////////////////////////////////////////
+
+object_reflected = function(obj)
+{
+	var reflected;
+	
+	reflected = Math.abs(obj.skewX - obj.skewY);
+	if(reflected > 180.0)
+		reflected = 360.0 - reflected;
+		
+	return (reflected > 90);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// function apply_transform(matrix, point)
+//
+// Applies a transform matrix to a point and returns the transformed point
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+apply_transform = function(matrix, point)
+{
+	// The matrix is of the form
+	//
+	//  a  b 
+	//  c  d 
+	//  tx ty
+	//
+	// so that x' = ax + cy + tx 
+	// and     y' = bx + dy + ty
+	//
+	// See http://www.senocular.com/flash/tutorials/transformmatrix/ for details.
+	
+	var transformed_point = {};
+	transformed_point.x = matrix.a * point.x + matrix.c * point.y + matrix.tx;
+	transformed_point.y = matrix.b * point.x + matrix.d * point.y + matrix.ty;
+	return transformed_point;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Returns a normalized version of the passed vector
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+normalizeVector = function(_vec)
+{
+	var magnitude = Math.sqrt(_vec.x * _vec.y + _vec.y * _vec.y);
+	return {x: _vec.x / magnitude, y: _vec.y / magnitude};
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Returns a scaled version of the passed vector
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+scaleVector = function(_vec, scale)
+{
+	return {x: _vec.x * scale, y: _vec.y * scale};
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Round a number to a given decimal precision
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+roundToPrecision = function(x, precision) 
+{
+    var factor = Math.pow(10, precision);
+    var tempNumber = x * factor;
+    var roundedTempNumber = Math.round(tempNumber);
+    return roundedTempNumber / factor;
+};
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// function get_global_pivot()
+//
+// Returns the pivot point of the currently selected element in global coordinates
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+get_global_pivot = function()
+{
+	var el = doc.selection[0];
+	
+	// In order to get the global pivot point,
+	// apply the element's transform to its local pivot point coordinates
+
+	var transform_matrix = el.matrix;
+	var pivot = doc.getTransformationPoint();
+	
+	// If we're dealing with a shape then just find its middle
+	//if("shape" == el.elementType)
+	//  return pivot;
+
+	//fl.trace("selection size: " + doc.selection.length);
+	//fl.trace("local pivot for " + doc.selection[0].libraryItem.name + ": " + pivot.x + ", " + pivot.y);
+	
+	// Apply the element's transform to the pivot coordinates to make them relative to the stage
+	return apply_transform(transform_matrix, pivot);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// function select_element(element, frame)
+//
+// Sets the current frame and selects the given element
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+select_element = function(element, frame)
+{
+	//prof.mark("about to select a(n) " + element.elementType);
+	// Changing timeline.currentFrame can be costly so let's do it only if we need to.
+	if(timeline.currentFrame != frame)
+	{
+		//prof.mark("about to switch frames");
+		timeline.currentFrame = frame;
+		//fl.trace("1: switched to frame " + frame);
+		//prof.mark("switched frames");
+	}
+	
+	doc.selectNone();
+	
+	//prof.mark("selected none");
+	
+	var new_selection = [];
+
+	new_selection[0] = element;
+	//fl.trace("selecting " + element.libraryItem.name + ": " + element.matrix.tx + ", " + element.matrix.ty);
+	doc.selection = new_selection;
+	
+	//prof.mark("selected object");
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// function get_shape_elements(layer, frame_num)
+//
+// Selects the any raw shapes that exist in the given layer/frame
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+get_shape_elements = function(layer, frame_num)
+{
+	var n;
+	
+	timeline.currentFrame = frame_num;
+	//fl.trace("2: switched to frame " + frame_num);
+	doc.selectNone();
+	var frame_shapes = [];
+	var frame_elements = layer.frames[frame_num].elements;
+	for(n = 0; n < frame_elements.length; n++)
+	{
+		// Search till we find a raw shape, then add it to the array
+		if(frame_elements[n].elementType == "shape" && !frame_elements[n].isGroup)
+		{
+			frame_shapes.push(frame_elements[n]);
+		}
+	}
+	return frame_shapes;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// SHAPE TWEEN FUNCTIONS //////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// A function to get an array which gives the order of the indeces of of the cubic curves used in the given contour
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+getCurveOrder = function(cont)
+{
+	he = cont.getHalfEdge();
+	
+	curveOrd = [];
+	
+	// Get the first curve index and make that one the first one in our list where we're keeping track of the order
+	firstCurve = segIndex = he.getEdge().cubicSegmentIndex;
+	//fl.trace("first curve I'm testing in getCurveOrder: " + segIndex);
+	
+	//fl.trace("cont.orientation: " + cont.orientation);
+	//fl.trace("cont.interior: " + cont.interior);
+	
+	n = 0;
+	do
+	{
+		// Add the next entry to the curve order list
+		curveOrd[n] = segIndex;
+		//fl.trace("curveOrd[" + n + "] = " + curveOrd[n]);
+		do
+		{
+			if(cont.orientation < 0)
+				he = he.getNext();
+			else he = he.getPrev();
+			segIndex = he.getEdge().cubicSegmentIndex;
+		}
+		while (segIndex == curveOrd[n]);
+		n++;
+	}
+	while (segIndex != firstCurve);
+	
+	//fl.trace("number of curves: " + curveOrd.length);
+	//fl.trace("curveOrd[0] = " + curveOrd[0]);
+	
+	return curveOrd;
+}
+
+pointHash = function(x, y)
+{
+	return "" + x + ", " + y; 
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Returns the index into curveOrder that is the first curve that should be used when
+// doing the tween
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+getStartVertex = function(edgeArray, hintInstance)
+{
+	var curContour, curEdge;
+	var startEdges = [];
+	var error = Number.MAX_VALUE;
+	var newError;
+	
+	//fl.trace("Now the number of curves is " + shape.numCubicSegments);
+	//fl.trace("Curve order: " + edgeOrd);
+	
+	for(curContour = 0; curContour < edgeArray.length; curContour++)
+	{
+		startEdges[curContour] = 0;
+		for(curEdge = 0; curEdge < edgeArray[curContour].length; curEdge++)
+		{
+			//fl.trace("testing the start point of curve " + n);
+			newError = fl.Math.pointDistance({x: hintInstance.x, y: hintInstance.y}, edgeArray[curContour][curEdge].pt0);
+			//fl.trace("newError = " + newError);
+			if(newError < error)
+			{
+				error = newError;
+				startEdges[curContour] = curEdge;
+			}
+		}
+		// Test pt2 in the final edge (the endpoint) only if the two endpoints aren't the same
+		if(edgeArray[curContour][edgeArray[curContour].length - 1].pt2.x  !== edgeArray[curContour][0].pt0.x ||
+		   edgeArray[curContour][edgeArray[curContour].length - 1].pt2.y  !== edgeArray[curContour][0].pt0.y)
+		newError = fl.Math.pointDistance({x: hintInstance.x, y: hintInstance.y}, edgeArray[curContour][edgeArray[curContour].length - 1].pt2);
+		if(newError < error)
+		{
+			error = newError;
+			startEdges[curContour] = edgeArray[curContour].length; // One higher than the highest index in edgeArray, indicating the endpoint
+		}
+		/*
+		if(startEdges[curContour] < edgeArray[curContour].length)
+			debugTrace("startEdges[" + curContour + "] = " + startEdges[curContour] + ": " + 
+					   edgeArray[curContour][startEdges[curContour]].pt0.x + ", " +
+					   edgeArray[curContour][startEdges[curContour]].pt0.y);
+		else
+			debugTrace("startEdges[" + curContour + "] = " + startEdges[curContour] + ": " + 
+					   edgeArray[curContour][startEdges[curContour] - 1].pt2.x + ", " +
+					   edgeArray[curContour][startEdges[curContour] - 1].pt2.y);
+		*/
+	}
+	//fl.trace("error = " + error);
+	return startEdges;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Returns a struct with two elements:
+//  - an array with one entry per contour, where each element is an array of objects with a 
+//    hint name, a contour number, and a vertex number
+//  - a hashobject that hashes on hint names and points to the relevant entry of the above array
+///////////////////////////////////////////////////////////////////////////////////////////////////
+/*
+function hintInfo(edges, hints)
+{
+	var curContour, curEdge;
+
+	this.edgeArray = edges;
+	this.hintArray = hints
+	this.hintVertex = [];
+	this.hintContour = [];
+	this.hintMap = [];
+	this.hintHash = []
+
+	var hintStuff = this.assembleHintPositions(edges, hints);
+	this.hintVertex = hintStuff.vertices;
+	this.hintContour = hintStuff.contours;
+
+	// Now hintData contains the closest contour and vertex to each hint in the hintArray array
+	// Next let's assemble the return array of arrays, one for each contour.
+	for(curContour = 0; curContour < this.edgeArray.length; curContour++)
+	{
+		this.hintMap[curContour] = [];
+	}
+	// Each entry is a hint name and the index of the vertex it points to in the given contour
+	for(var hintNum = 0; hintNum < this.hintArray.length; hintNum++)
+	{
+		var hintInfoEntry = {hintName:   this.hintArray[hintNum].libraryItem.name,
+							 vertexNum:  this.hintVertex[hintNum], 
+							 contourNum: this.hintContour[hintNum]};
+		this.hintMap[this.hintContour[hintNum]] =  hintInfoEntry;
+		this.hintHash[this.hintArray[hintNum].libraryItem.name] = hintInfoEntry; 
+	}
+}
+
+hintInfo.prototype.assembleHintPositions = function(edgeArray, hintArray)
+{
+	var curContour, curEdge;
+	var error;
+	var newError;
+	var hintVertex = [];
+	var hintContour = [];
+	
+	//fl.trace("Now the number of curves is " + shape.numCubicSegments);
+	//fl.trace("Curve order: " + edgeOrd);
+	
+	for(var hintNum = 0; hintNum < hints.length; hintNum++)
+	{
+		error = Number.MAX_VALUE;
+		for(curContour = 0; curContour < edges.length; curContour++)
+		{
+			for(curEdge = 0; curEdge < edges[curContour].length; curEdge++)
+			{
+				//fl.trace("testing the start point of curve " + n);
+				newError = fl.Math.pointDistance({x: hints[hintNum].x, y: hints[hintNum].y}, edges[curContour][curEdge].pt0);
+				//fl.trace("newError = " + newError);
+				if(newError < error)
+				{
+					error = newError;
+					hintVertex[hintNum] = curEdge;
+					hintContour[hintNum] = curContour;
+				}
+			}
+			// Test pt2 in the final edge (the endpoint) only if the two endpoints aren't the same
+			if(edges[curContour][edges[curContour].length - 1].pt2.x  !== edges[curContour][0].pt0.x ||
+			   edges[curContour][edges[curContour].length - 1].pt2.y  !== edges[curContour][0].pt0.y)
+			{
+				newError = fl.Math.pointDistance({x: hints[hintNum].x, y: hints[hintNum].y}, edges[curContour][edges[curContour].length - 1].pt2);
+				if(newError < error)
+				{
+					error = newError;
+					hintVertex[hintNum] = edges[curContour].length; // One higher than the highest index in edges, indicating the endpoint
+					hintContour[hintNum] = curContour;
+				}
+			}
+		}
+	}
+	return {contours: hintContour, vertices: hintVertex};
+}
+
+hintInfo.prototype.matchVertices = function(edges, hints)
+{
+	var curContour;
+	this.edgeArrayDest = edges;
+
+	if(hints.length)
+	{
+		var hintStuff = this.assembleHintPositions(edges, hints);
+		var hintVertex2 = hintStuff.vertices;
+		var hintContour2 = hintStuff.contours;
+
+
+		// Now match the hint data we just got (dest) with the data we already had (source)
+		for(curContour = 0; curContour < this.edgeArray.length; curContour++)
+		{
+			this.matchArray[curContour] = [];
+		}
+
+		for(var hintNum = 0; hintNum < this.hintArray.length; hintNum++)
+		{
+			var hintName = hints[hintNum].libraryItem.name;
+			var sourceHintInfo = this.hintHash(hintName);
+			if(sourceHintInfo !== undefined) // the source shape had this hint too
+			{
+				this.matchArray[hintContour[hintNum]] = {v0: sourceHintInfo.vertexNum, c0: sourceHintInfo.contourNum,
+														 v1: hintVertex2[hintNum],     c1: hintContour2[hintNum]};
+			}
+		}
+
+		// Now all the hinted vertices have been matched up in retArray. Let's make sure they're in a sane order.
+		// First sort based on the source vertex order
+		this.matchArray.sort(this.hintArraySort);
+
+		// Now that the array is sorted we need to make sure that the dest vertices are monotonic in each contour
+		var contourVisited = [];
+		var curSourceContour;
+		var curDestContour;
+		var destVertexDir; // positive if the vertex indices are increasing, negative if decreasing
+		for(curSourceContour = 0; curSourceContour < this.matchArray.length; curSourceContour++)
+		{
+			curDestContour = this.matchArray[curSourceContour][0].c1;
+			if(this.matchArray[curSourceContour][0].v1 === 0)
+				destVertexDir = 1; // it can only go up from 0
+			else if(this.matchArray[curSourceContour][0].v1 === edges.length)
+				destVertexDir = -1; // If we start at the last vertex it can only go down from there
+			else destVertexDir = 0;
+
+			// Make sure this dest contour isn't clamed by another source contour
+			if(contourVisited[curDestContour])
+			{
+				this.matchArray = undefined;
+				return HINT_ERROR_CONTOUR_JUMP;
+			}
+			else
+				contourVisited[curDestContour] = true;
+
+			for(var n = 0; n < this.matchArray[curSourceContour].length; n++)
+			{
+				if(this.matchArray[curSourceContour][n].c1 !== curDestContour) // dest contour changed. Error!
+				{
+					this.matchArray = undefined;
+					return HINT_ERROR_CONTOUR_JUMP;
+				}
+				if(n > 0)
+				{
+					if(destVertexDir === 0) // Set the direction that all vertices will have to go (up/down)
+						destVertexDir = this.matchArray[curSourceContour][n] - this.matchArray[curSourceContour][n -1];
+					else
+					{
+						// Return an error if the vertex doesn't go in the same direction as previous vertices
+						// Multiply destVertexDir by the current vertex difference and if it's negative they're in opposite directions
+						if(destVertexDir * (this.matchArray[curSourceContour][n] - this.matchArray[curSourceContour][n -1]) < 0)
+						{
+							this.matchArray = undefined;
+							return HINT_ERROR_OUT_OF_ORDER;
+						}
+					} 
+				} 
+			}
+			this.matchArray[curSourceContour].vertexDirection = destVertexDir;
+		}
+	}
+	else // no hints. Throw something together to return
+	{
+		// Match up everything one to one. This is probably something to do more intelligently in the future.
+		for(curContour = 0; curContour < this.edgeArray.length && curContour < edges.length; curContour++)
+			this.matchArray[curContour] = [{c0: curContour, v0: 0, c1: curContour, v1: 0}];
+	}
+
+	// Return the vertex matchups
+	return this.matchArray;
+}
+
+hintInfo.prototype.hintArraySort = function(a, b)
+{
+	if(if a.c0 != b.c0)      // first sort by contour
+		return a.c0 - b.c0;
+	if(if a.v0 != b.v0)      // within contours, sort by vertex
+		return a.v0 - b.v0;
+	if(if a.c1 != b.c1)      // next sort by dest contour
+		return a.c1 - b.c1;
+	if(if a.v1 != b.v1)      // and finally, in dest contours, sort by vertex
+		return a.v1 - b.v1;
+	return 0;
+}
+
+hintInfo.prototype.reverseMatchArray = function(sourceContourNum)
+{
+	var n;
+
+	if(this.matchArray !== undefined)
+	{
+		if(sourceContourNum < this.matchArray.length)
+		{
+			for(n = 0; n < this.edgeArrayDest.length; n++)
+			{
+				this.matchArray[sourceContourNum][n].n1 = this.edgeArrayDest.length - n;
+			}
+		}
+	}
+}
+*/
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// function set_tween_fill(fills, tween_dist)
+//
+// Sets the custom fill style to be a blend between the first and second 
+// elements of the fill array.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+set_tween_fill = function(fills, tween_dist)
+{	
+	// We have to have sepparate color and alpha vars, because Javascript's
+	// bitwise operators operate as if it's 32-bit signed integer :(
+	var colors = [];
+	var NO_COLOR = -1;
+	var alphas = [];
+	var x;
+	var new_fill = doc.getCustomFill("toolbar");
+	
+	var do_fill;
+	
+	do_fill = false;  // This will be set to true if one or both shapes have a fill
+	
+	for(x = 0; x < fills.length; x++)
+	{
+		// Get the integer representation of the RGBA value
+		if(fills[x].style == "noFill")
+		{
+			colors[x] = NO_COLOR;
+			alphas[x] = 0;          // 100% transparent
+		}
+		else
+		{
+			// At least one of the fills exists, so do the fill blend
+			do_fill = true;
+			if(typeof (fills[x].color) == "number")       // The integer will be of the form 0xrrggbb
+			{
+				colors[x] = fills[x].color;               // So we must add in the opaque alpha value
+				alphas[x] = 0;
+			}
+			else if(fills[x].color.length == 7)           // "#RRGGBB"
+			{
+				colors[x] = parseInt(fills[x].color.slice(1), 16);
+				alphas[x] = 0xff;
+			}
+			else                                          // "#RRGGBBAA"
+			{
+				colors[x] = parseInt(fills[x].color.slice(1, 7), 16);
+				alphas[x] = parseInt(fills[x].color.slice(7), 16);
+			}
+		}
+	}
+	
+	if(!do_fill)
+		return false;
+	
+	new_fill = doc.getCustomFill("toolbar");
+	
+	// If one of the fills didn't exist then copy the color from the other one
+	if(colors[0] == NO_COLOR)
+		colors[0] = colors[1]
+	if(colors[1] == NO_COLOR)
+		colors[1] = colors[0]
+		
+	var src_mult = 1 - tween_dist;
+	var dest_mult = tween_dist;
+	
+	colors[2] = (((colors[0] & 0xff0000) * src_mult + (colors[1] & 0xff0000) * dest_mult) & 0xff0000) +
+	            (((colors[0] & 0x00ff00) * src_mult + (colors[1] & 0x00ff00) * dest_mult) & 0x00ff00) +
+                (((colors[0] & 0x0000ff) * src_mult + (colors[1] & 0x0000ff) * dest_mult) & 0x0000ff);
+    alphas[2] = Math.round(alphas[0] * src_mult + alphas[1] * dest_mult);
+    
+    var new_color_string = colors[2].toString(16);
+    // Pad with zeros
+    for(x = new_color_string.length; x < 6; x++)
+    	new_color_string = "0" + new_color_string;
+    if(alphas[2] < 0x10)
+    	new_color_string = new_color_string + "0";
+    new_color_string = "#" + new_color_string + alphas[2].toString(16);
+    
+    new_fill.color = new_color_string;
+
+	new_fill.style = "solid"; 
+	doc.setCustomFill(new_fill);
+	
+	return true;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// function set_tween_stroke(strokes, tween_dist)
+//
+// Sets the custom stroke style to be a blend between the first and second 
+// elements of the stroke array.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+set_tween_stroke = function(strokes, tween_dist)
+{	
+	// We have to have sepparate color and alpha vars, because Javascript's
+	// bitwise operators operate as if it's 32-bit signed integer :(
+	var colors = [];
+	var NO_COLOR = -1;
+	var alphas = [];
+	var x;
+	var new_stroke = doc.getCustomStroke("toolbar");
+	
+	var do_stroke;
+	
+	do_stroke = false;  // This will be set to true if one or both shapes have a stroke
+	
+	for(x = 0; x < strokes.length; x++)
+	{
+		// Get the integer representation of the RGBA value
+		if(strokes[x].shapeFill === undefined)
+		{
+			colors[x] = NO_COLOR;
+			alphas[x] = 0;          // 100% transparent
+		}
+		else
+		{
+			// At least one of the strokes exists, so do the stroke blend
+			do_stroke = true;
+			if(typeof (strokes[x].shapeFill.color) == "number")       // The integer will be of the form 0xrrggbb
+			{
+				colors[x] = strokes[x].shapeFill.color;               // So we must add in the opaque alpha value
+				alphas[x] = 0;
+			}
+			else if(strokes[x].shapeFill.color.length == 7)           // "#RRGGBB"
+			{
+				colors[x] = parseInt(strokes[x].shapeFill.color.slice(1), 16);
+				alphas[x] = 0xff;
+			}
+			else                                          // "#RRGGBBAA"
+			{
+				colors[x] = parseInt(strokes[x].shapeFill.color.slice(1, 7), 16);
+				alphas[x] = parseInt(strokes[x].shapeFill.color.slice(7), 16);
+			}
+		}
+	}
+	
+	if(!do_stroke)
+		return false;
+	
+	new_stroke.shapeFill = doc.getCustomFill("toolbar");
+	
+	// If one of the strokes didn't exist then copy the color from the other one
+	if(colors[0] == NO_COLOR)
+		colors[0] = colors[1]
+	if(colors[1] == NO_COLOR)
+		colors[1] = colors[0]
+	
+	var src_mult = 1 - tween_dist;
+	var dest_mult = tween_dist;
+	
+	colors[2] = (((colors[0] & 0xff0000) * src_mult + (colors[1] & 0xff0000) * dest_mult) & 0xff0000) +
+	            (((colors[0] & 0x00ff00) * src_mult + (colors[1] & 0x00ff00) * dest_mult) & 0x00ff00) +
+                (((colors[0] & 0x0000ff) * src_mult + (colors[1] & 0x0000ff) * dest_mult) & 0x0000ff);
+    alphas[2] = Math.round(alphas[0] * src_mult + alphas[1] * dest_mult);
+    
+    var new_color_string = colors[2].toString(16);
+    // Pad with zeros
+    for(x = new_color_string.length; x < 6; x++)
+    	new_color_string = "0" + new_color_string;
+    if(alphas[2] < 0x10)
+    	new_color_string = new_color_string + "0";
+    new_color_string = "#" + new_color_string + alphas[2].toString(16);
+    
+    new_stroke.shapeFill.color = new_color_string;
+
+	new_stroke.shapeFill.style = "solid"; 
+
+	new_thickness = strokes[0].thickness * src_mult + strokes[1].thickness * dest_mult;
+	if(new_thickness <= 0)
+		return false;	    // No stroke.
+	new_stroke.thickness = new_thickness;
+	
+	doc.setCustomStroke(new_stroke);
+	
+	return true;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Return true if the shape doesn't have any unconnected vertices
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+shapeIsClosed = function(edges)
+{
+	for(var n = 1; n < edges.length; n++)
+	{
+		if(edges[n - 1].pt2.x !== edges[n].pt0.x || edges[n - 1].pt2.y !== edges[n].pt0.y)
+			return false;
+	}
+	if(edges[edges.length - 1].pt2.x !== edges[0].pt0.x || edges[edges.length - 1].pt2.y !== edges[0].pt0.y)
+		return false;
+	
+	// All the vertices match up, so the shape is closed.
+	return true;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Return true if the shape traverses clockwise
+//
+// Uses an algorithm to determine [counter-]clockwise status that sums the determinants 
+// (x2 - x1)(y2 + y1) for all consecutive pairs of vertices. Note that the value returned
+// from this function won't be accurate if the shape isn't closed.
+//
+// Technique grabbed from:
+// http://stackoverflow.com/questions/1165647/how-to-determine-if-a-list-of-polygon-points-are-in-clockwise-order
+// See also: https://en.wikipedia.org/wiki/Shoelace_formula
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+shapeIsClockwise = function(edges)
+{
+	determinantSum = 0;
+	for(var n = 0; n < edges.length; n++)
+	{
+		determinantSum += (edges[n].pt2.x - edges[n].pt0.x) * (edges[n].pt2.y + edges[n].pt0.y);
+	}
+	
+	// If the determinant sum is positive then the shape is clockwise.
+	return (determinantSum > 0);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// reverseEdgeOrder
+//
+// Reverses the order of the vertices in a shape. Takes a list of edges and returns a new list
+// with the vertices in reverse order.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+reverseEdgeOrder = function(_edges)
+{
+	var reversedEdges = [];
+	for(var n = 0; n < _edges.length; n++)
+	{
+		reversedEdges[_edges.length - n - 1] = {pt0: _edges[n].pt2, pt1: _edges[n].pt1, pt2: _edges[n].pt0};
+	}
+	
+	return reversedEdges;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// function tween_shape_quad(source_info, dest_info, source_frame, tween_dist)
+//
+// Takes as parameters a source and destination shape and the frame the source is on.
+// Creates a shape that's a blend between the two endpoints.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+tween_shape_quad = function(source_info, dest_info, source_frame, tween_dist)
+{	
+	var shape = [];
+	var orderedEdges = [];
+	var hintVertices = [];
+	var hints = [];
+	var fills = [];
+	var strokes = [];
+	var m, n;
+	
+	var SOURCE = 0;
+	var DEST = 1;
+	
+	shape[SOURCE] = source_info.shape;
+	shape[DEST] = dest_info.shape;
+	hints[SOURCE] = source_info.hint;
+	hints[DEST] = dest_info.hint;
+	
+	
+	for(m = 0; m < 2; m++)
+	{
+		debugTrace("Shape " + m + " has " + shape[m].edges.length + " edges.");
+		// get an array of edge orders
+		orderedEdges[m] = getEdgeOrderQuad(shape[m].edges);
+		// get an array of the first edge in each edge order array
+		hintVertices[m] = getStartVertex(orderedEdges[m], hints[m][0]);
+		
+		debugTrace((m === SOURCE ? "source" : "dest") + " has " + orderedEdges[m].length + " contours");
+				
+		// Get the fills and strokes
+		if(shape[m].contours.length > 1)
+			fills[m] = shape[m].contours[1].fill;
+		else fills[m] = EMPTY_FILL;
+		strokes[m] = shape[m].edges[0].stroke;
+	}
+	
+	var contourNum, sourceDest;
+	
+	// If both edge arrays aren't the same orientation, reverse one of them.
+	for(contourNum = 0; contourNum < orderedEdges[SOURCE].length; contourNum++)
+	{
+		debugTrace("Checking orientation of shape " + contourNum + " of " + orderedEdges[SOURCE].length);
+		if(contourNum < orderedEdges[SOURCE].length && contourNum < orderedEdges[DEST].length &&                   // if both source and target have at least this many shapes 
+		   shapeIsClosed(orderedEdges[SOURCE][contourNum]) &&                                                   // and they're closed 
+		   shapeIsClockwise(orderedEdges[SOURCE][contourNum]) != shapeIsClockwise(orderedEdges[DEST][contourNum])) // and they don't have the same orientation
+		{
+			debugTrace("Reversing source shape's orientation because source and dest don't match");
+			// reverse the source so it matches the orientation of the target
+			orderedEdges[SOURCE][contourNum] = reverseEdgeOrder(orderedEdges[SOURCE][contourNum]);
+			if(hintVertices[SOURCE][contourNum] !== 0) // this is a closed shape so if the hint is at 0 it will remain there
+				hintVertices[SOURCE][contourNum] = orderedEdges[SOURCE][contourNum].length - hintVertices[SOURCE][contourNum];
+		}
+	}
+
+	for(sourceDest = 0; sourceDest < 2; sourceDest++)
+	{
+		// Reverse the edge order if firstEdge == the number of edges (meaning "start from the last endpoint")
+		for(contourNum = 0; contourNum < orderedEdges[sourceDest].length; contourNum++)
+		{
+			debugTrace("sourceDest = " + sourceDest + ", contourNum = " + contourNum);
+			if(hintVertices[sourceDest][contourNum] === orderedEdges[sourceDest][contourNum].length)
+			{
+				debugTrace("Reversing shape " + sourceDest + "'s orientation because firstEdge points to the last endpoint");
+				// reverse the source so it matches the orientation of the target
+				orderedEdges[sourceDest][contourNum] = reverseEdgeOrder(orderedEdges[sourceDest][contourNum]);
+				hintVertices[sourceDest][contourNum] = 0;
+			}
+		}
+	}
+	
+	// Determine if the order of the points in each curve is 
+	// flipped from the order of the curves
+	
+	//debugTrace("number of subshapes: " + orderedEdges[SOURCE].length);
+	
+	var tweenPath = [];
+	
+	// Create the new shape as a blend between the start and finish shapes */
+	for(var subShapeNum = 0; subShapeNum < orderedEdges[SOURCE].length; subShapeNum++)
+	{
+		debugTrace("Creating tween path for sub-shape " + subShapeNum)
+		for(m = 0; m < orderedEdges[SOURCE][subShapeNum].length; m++)
+		{
+			debugTrace("Edge: ");
+			debugTrace(""  + coords_toString(orderedEdges[SOURCE][subShapeNum][m].pt0));
+			debugTrace(""  + coords_toString(orderedEdges[SOURCE][subShapeNum][m].pt1));
+			debugTrace(""  + coords_toString(orderedEdges[SOURCE][subShapeNum][m].pt2));
+		}
+		if(subShapeNum < orderedEdges[SOURCE].length && subShapeNum < orderedEdges[DEST].length)
+			tweenPath[subShapeNum] = makeTweenPath(orderedEdges[SOURCE][subShapeNum], hintVertices[SOURCE][subShapeNum], 
+												   orderedEdges[DEST][subShapeNum],   hintVertices[DEST][subShapeNum], tween_dist);
+	}
+	
+	// Set the fill and stroke for the new tweened shape
+	var old_fill = doc.getCustomFill("toolbar");  
+	var old_stroke = doc.getCustomStroke("toolbar");
+	var do_fill = set_tween_fill(fills, tween_dist);
+	var do_stroke = set_tween_stroke(strokes, tween_dist);
+	
+	var old_shapes = get_shape_elements(source_info.layer, source_frame);
+	doc.selection = old_shapes;
+	doc.group();
+	doc.deleteSelection();
+	
+	// draw the curve
+	for(n = 0; n < tweenPath.length; n++)
+		tweenPath[n].makeShape(!do_fill, !do_stroke);
+
+	// Retstore the original fill and stroke
+	doc.setCustomFill(old_fill);
+	doc.setCustomStroke(old_stroke);
+	
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// function tweenShapeQuadWithHints(source_info, dest_info, source_frame, tween_dist)
+//
+// Takes as parameters a source and destination shape and the frame the source is on.
+// Creates a shape that's a blend between the two endpoints, using any shape hints
+// that are available.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+tweenShapeQuadWithHints = function(source_info, dest_info, source_frame, tween_dist)
+{	
+	var shape = [];
+	var orderedEdges = [];
+	var hints = [];
+	var fills = [];
+	var strokes = [];
+	var m, n;
+	
+	var SOURCE = 0;
+	var DEST = 1;
+	
+	shape[SOURCE] = source_info.shape;
+	shape[DEST] = dest_info.shape;
+	hints[SOURCE] = source_info.hint;
+	hints[DEST] = dest_info.hint;
+	
+	
+	for(m = 0; m < 2; m++)
+	{
+		debugTrace("Shape " + m + " has " + shape[m].edges.length + " edges.");
+		// get an array of edge orders -- one entry for each contour
+		orderedEdges[m] = getEdgeOrderQuad(shape[m].edges);
+		
+		debugTrace((m === SOURCE ? "source" : "dest") + " has " + orderedEdges[m].length + " contours");
+				
+		// Get the fills and strokes
+		if(shape[m].contours.length > 1)
+			fills[m] = shape[m].contours[1].fill;
+		else fills[m] = EMPTY_FILL;
+		strokes[m] = shape[m].edges[0].stroke;
+	}
+
+	// Get vertex matches based on hints
+	var hintData = new hintInfo(orderedEdges[SOURCE], hints[SOURCE]);
+	var vertexMatches = hintData.matchVertices(orderedEdges[DEST], hints[DEST])
+	
+	var contourNum = [];
+	var sourceDest;
+
+	contourNum[SOURCE] = 0;
+	contourNum[DEST] = vertexMatches[contourNum[SOURCE]][0].c1;
+	var bReverse = [false, false];
+
+	if(vertexMatches[contourNum[SOURCE]].vertexDirection < 0) // dest progresses in the opposite dir of source
+		bReverse[DEST] = !bReverse[DEST];
+
+	// For now let's require that both shapes are either closed or unclosed.
+	if(shapeIsClosed(orderedEdges[SOURCE][contourNum[SOURCE]]))
+	{
+		if(!shapeIsClosed(orderedEdges[DEST][contourNum[DEST]])) // dest is unclosed
+		{
+			fl.trace("Error in shape tween: source contour is closed but dest contour isn't.")
+			return;
+		}
+		// They're both closed.
+
+		if(shapeIsClockwise(orderedEdges[SOURCE][contourNum[SOURCE]]) != shapeIsClockwise(orderedEdges[DEST][contourNum[DEST]])) // and they don't have the same orientation
+		{
+			// Dest and source have different clockwise values, so reverse one of them.
+			bReverse[DEST] = !bReverse[DEST];
+		}
+	}
+	else  // source is unclosed
+	{
+		if(shapeIsClosed(orderedEdges[DEST][contourNum[DEST]])) // dest is closed
+		{
+			fl.trace("Error in shape tween: source contour isn't closed but dest contour is.")
+			return;
+		}		
+	}
+	
+	// Determine if the order of the points in each curve is 
+	// flipped from the order of the curves
+
+	if(bReverse[DEST])
+	{
+		hintInfo.reverseMatchArray(contourNum[SOURCE]);
+		orderedEdges[DEST][contourNum[DEST]] = reverseEdgeOrder(orderedEdges[sourceDest][contourNum[DEST]]);
+	}
+
+	var tweenPath = [];
+	
+	// Create the new shape as a blend between the start and finish shapes
+	for(var subShapeNum = 0; subShapeNum < orderedEdges[SOURCE].length; subShapeNum++)
+	{
+		debugTrace("Creating tween path for sub-shape " + subShapeNum)
+		for(m = 0; m < orderedEdges[SOURCE][subShapeNum].length; m++)
+		{
+			debugTrace("Edge: ");
+			debugTrace(""  + coords_toString(orderedEdges[SOURCE][subShapeNum][m].pt0));
+			debugTrace(""  + coords_toString(orderedEdges[SOURCE][subShapeNum][m].pt1));
+			debugTrace(""  + coords_toString(orderedEdges[SOURCE][subShapeNum][m].pt2));
+		}
+		if(subShapeNum < orderedEdges[SOURCE].length && subShapeNum < orderedEdges[DEST].length)
+			tweenPath[subShapeNum] = makeTweenPath(orderedEdges[SOURCE][subShapeNum], hintVertices[SOURCE][subShapeNum], 
+												   orderedEdges[DEST][subShapeNum],   hintVertices[DEST][subShapeNum], tween_dist);
+	}
+	
+	// Set the fill and stroke for the new tweened shape
+	var old_fill = doc.getCustomFill("toolbar");  
+	var old_stroke = doc.getCustomStroke("toolbar");
+	var do_fill = set_tween_fill(fills, tween_dist);
+	var do_stroke = set_tween_stroke(strokes, tween_dist);
+	
+	var old_shapes = get_shape_elements(source_info.layer, source_frame);
+	doc.selection = old_shapes;
+	doc.group();
+	doc.deleteSelection();
+	
+	// draw the curve
+	for(n = 0; n < tweenPath.length; n++)
+		tweenPath[n].makeShape(!do_fill, !do_stroke);
+
+	// Retstore the original fill and stroke
+	doc.setCustomFill(old_fill);
+	doc.setCustomStroke(old_stroke);
+	
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// makeTweenPath(edges0, edges1)
+//
+// Creates a tweened shape between the two ordered arrays of edges
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+makeTweenPath = function(edges0, firstEdge0, edges1, firstEdge1, tweenDist)
+{
+	var segPoints = [];
+    var retPath = fl.drawingLayer.newPath();
+
+	// Check if there's a different number of edges in the two shapes
+	//if(edges0.length != edges1.length)
+	{
+		var tweenedEdges = tweenCompoundBezier(edges0, firstEdge0, edges1, firstEdge1, tweenDist);
+
+		// If the first edge is a straight line then we first need to add the initial point, or it won't get drawn
+		if(tweenedEdges[0].pt1 === INTERSECTION_PARALLEL || tweenedEdges[0].pt1 === undefined)
+			retPath.addPoint(tweenedEdges[0].pt0.x, tweenedEdges[0].pt0.y);
+		for(var edgeNum = 0; edgeNum < tweenedEdges.length; edgeNum++)
+		{
+			// First make sure this edge start with the endpoint of the previous edge
+			if(edgeNum > 0)
+				tweenedEdges[edgeNum].pt0 = tweenedEdges[edgeNum - 1].pt2
+			
+			debugTrace("Adding edge to drawing path:");
+			debugTrace("pt0: " + coords_toString(tweenedEdges[edgeNum].pt0));
+			debugTrace("pt0 -> pt1: " + (getAngle({x: tweenedEdges[edgeNum].pt1.x - tweenedEdges[edgeNum].pt0.x, 
+			                                      y: tweenedEdges[edgeNum].pt1.y - tweenedEdges[edgeNum].pt0.y}) * 180 / Math.PI) + " degrees");
+			debugTrace("pt1: " + coords_toString(tweenedEdges[edgeNum].pt1));
+			debugTrace("pt2 -> pt1: " + (getAngle({x: tweenedEdges[edgeNum].pt1.x - tweenedEdges[edgeNum].pt2.x, 
+			                                      y: tweenedEdges[edgeNum].pt1.y - tweenedEdges[edgeNum].pt2.y}) * 180 / Math.PI) + " degrees");
+			debugTrace("pt2: " + coords_toString(tweenedEdges[edgeNum].pt2));
+			
+			addEdgeToPath(tweenedEdges[edgeNum], retPath);
+		}
+	}
+/*
+	else // the two sets of edges have the same number of edges
+	{
+		for(var edgeNum = 0; edgeNum < edges0.length; edgeNum++)
+		{
+			var edgeNum0 = (edgeNum + firstEdge0) % edges0.length;
+			var edgeNum1 = (edgeNum + firstEdge1) % edges1.length;
+
+			//debugTrace("edgeNum0 = (edgeNum + firstEdge0) % edges0.length");
+			//debugTrace("edgeNum0 = (" + edgeNum + " + " + firstEdge0 + ") % " + edges0.length + " = " + edgeNum0);
+			//debugTrace("edgeNum1 = (edgeNum + firstEdge1) % edges1.length");
+			//debugTrace("edgeNum1 = (" + edgeNum + " + " + firstEdge1 + ") % " + edges1.length + " = " + edgeNum1);
+
+			var tweenedEdge = makeTweenedEdge(edges0[edgeNum0], edges1[edgeNum1], tweenDist);
+
+			addEdgeToPath(tweenedEdge, retPath);
+		}
+	}
+*/
+	return retPath;
+}
+
+addEdgeToPath = function(edge, path)
+{
+	if(edge.pt1 === INTERSECTION_PARALLEL || edge.pt1 === undefined) // do a straight line
+		addSegmentToPath(edge, path);
+	else if(edge.pt3 === undefined) // do a quadratic curve
+	{
+		path.addCurve(roundToPrecision(edge.pt0.x, PATH_PRECISION), roundToPrecision(edge.pt0.y, PATH_PRECISION),
+					  roundToPrecision(edge.pt1.x, PATH_PRECISION), roundToPrecision(edge.pt1.y, PATH_PRECISION),
+					  roundToPrecision(edge.pt2.x, PATH_PRECISION), roundToPrecision(edge.pt2.y, PATH_PRECISION));
+	}
+	else // do a cubic curve
+	{
+		path.addCubicCurve(roundToPrecision(edge.pt0.x, PATH_PRECISION), roundToPrecision(edge.pt0.y, PATH_PRECISION),
+						   roundToPrecision(edge.pt1.x, PATH_PRECISION), roundToPrecision(edge.pt1.y, PATH_PRECISION),
+						   roundToPrecision(edge.pt2.x, PATH_PRECISION), roundToPrecision(edge.pt2.y, PATH_PRECISION),
+						   roundToPrecision(edge.pt3.x, PATH_PRECISION), roundToPrecision(edge.pt3.y, PATH_PRECISION));
+	}
+}
+
+addSegmentToPath = function(edge, path)
+{
+	debugTrace("Adding a straight edge to path: " + coords_toString(edge.pt0) + "; " + coords_toString(edge.pt2));
+	//path.addPoint(edge.pt0.x, edge.pt0.y);
+	path.addPoint(roundToPrecision(edge.pt2.x, PATH_PRECISION), roundToPrecision(edge.pt2.y, PATH_PRECISION));
+}
+
+matchVertices = function(vertPos0, vertPos1)
+{
+	var vertMap = [];
+	var normPos0 = [];
+	var normPos1 = [];
+
+	// Calculate the normalized positions of all the vertices
+	for(n = 0; n < vertPos0.length; n++)
+		normPos0[n] = (vertPos0[n] - vertPos0[0]) / (vertPos0[vertPos0.length - 1] - vertPos0[0]);		
+	for(n = 0; n < vertPos1.length; n++)
+		normPos1[n] = (vertPos1[n] - vertPos1[0]) / (vertPos1[vertPos1.length - 1] - vertPos1[0]);		
+
+	debugTrace("matchVertices() source            = " + vertPos0 + ", dest = " + vertPos1);
+	debugTrace("matchVertices() normalized source = " + normPos0 + ", dest = " + normPos1);
+	
+	// Now go through the corners and try to match them up.
+	// If both lists have the same number of corners it's easy.
+	if(normPos0.length == normPos1.length)
+	{
+		debugTrace("Source and Dest have the same number of vertices. Matching one to one on " + normPos0.length + " vertices");
+		for(n = 0; n < normPos0.length; n++)
+			vertMap[n] = n;
+	}
+	else // go through all the corners and match them as closely as possible
+	{
+		var prevMatchError; // the error of the last match made
+		var currentMatchError;
+		var nDestMatchError;
+		var nSource;
+		var nDest;
+		var nDestError;
+		var prevMatchBackup;
+		var prevMatchBackupError;
+		var matchError = []
+		
+		// Set the first vertex match. It is always 0, with 0 error.
+		prevMatchError = 0;
+		vertMap[0] = 0;
+		
+		for(nSource = 1; nSource < normPos0.length; nSource++)
+		{
+			// Start with the match from the previous iteration
+			nDest =  vertMap[nSource - 1];
+			// Find the match error between the current source vertex and the dest vertex matched in the previous iteration
+			nDestError = Math.abs(normPos0[nSource] - normPos1[nDest]);
+			// If this match is better, undo the previous one in favor of this one.
+			if(nDestError < prevMatchError)
+			{
+				debugTrace("Overriding previous vertex match!");
+				debugTrace("Matched source vertex " + nSource + " to dest vertex " + nDest + ", error = " + nDestError);
+				debugTrace("Re-matching source vertex " + (nSource - 1) + " to dest vertex " + prevMatchBackup);
+				vertMap[nSource] = nDest;
+				vertMap[nSource - 1] = prevMatchBackup;
+				prevMatchBackup = undefined;
+				currentMatchError = nDestError;
+				nDest++;
+			}
+			else
+			{
+				debugTrace("Previous vertex match is safe. Preparing to find match for source vertex " + nSource);
+
+				// The previous match is safe. Clear out all the "previous" vars
+				nDest++;
+				prevMatchError = Infinity;
+				prevMatchBackup = undefined;
+				prevMatchBackupError = Infinity;
+			}
+			
+			nDestError = Math.abs(normPos0[nSource] - normPos1[nDest]);
+			while(nDest < vertPos1.length && nDestError < prevMatchError)
+			{
+				debugTrace("Matched source vertex " + nSource + " at " + normPos0[nSource] + " to dest vertex " + nDest + " at " + normPos1[nDest] + ", error = " + nDestError);
+				// Save the previous match in case a future match overrides this one
+				prevMatchBackup = vertMap[nSource];
+				prevMatchError = nDestError;
+				prevMatchBackupError = currentMatchError;
+				vertMap[nSource] = nDest;
+				currentMatchError = nDestError;
+				nDest++;
+				nDestError = Math.abs(normPos0[nSource] - normPos1[nDest]);
+				debugTrace("     nDestError = " + nDestError);
+				debugTrace("          nDest = " + nDest);
+				debugTrace("vertPos1.length = " + vertPos1.length);
+				debugTrace(" prevMatchError = " + prevMatchError);
+			}
+			
+			// Now we've got a match for the current source vertex. Clean up for the next iteration
+			prevMatchError = currentMatchError;
+		}
+	}
+	
+	return vertMap;
+}
+
+matchCornersAndVertices = function(bez0, bez1, normalizedVertexDistances0, normalizedVertexDistances1)
+{
+	debugTrace("------------ Start matchShapeCorners() ----------------")
+	var n, n0, n1 = 0;
+	var vertexMap = [];
+	var cornerMap = [];
+	var matchError;
+	
+	// First match corners
+	// Assemble a list of corners in the two edge lists
+	var cornerPos0 = [0];
+	var cornerIndex0 = [0];
+	var cornerPos1 = [0];
+	var cornerIndex1 = [0];
+	
+	for(n = 0; n < bez0.beziers.length; n++)
+	{
+		if(bez0.vertexIsCorner[n])
+		{
+			cornerPos0.push(normalizedVertexDistances0[n]);
+			cornerIndex0.push(n);
+			debugTrace("source vertex " + n + " is corner " + (cornerIndex0.length - 1));
+		}
+	}
+	cornerPos0.push(1);
+	cornerIndex0.push(n);
+	for(n = 0; n < bez1.beziers.length; n++)
+	{
+		if(bez1.vertexIsCorner[n])
+		{
+			cornerPos1.push(normalizedVertexDistances1[n]);
+			cornerIndex1.push(n);
+			debugTrace("dest vertex " + n + " is corner " + (cornerIndex1.length - 1));
+		}
+		else
+			debugTrace("dest vertex " + n + " isn't a corner");
+	}
+	cornerPos1.push(1);
+	cornerIndex1.push(n);
+	
+	cornerMap = matchVertices(cornerPos0, cornerPos1);
+	debugTrace("Corner mapping results:");
+	for(n = 0; n < cornerMap.length; n++)
+	{
+		debugTrace("Source corner " + n               + " -> dest corner " + cornerMap[n]);
+		debugTrace("       vertex " + cornerIndex0[n] + " ->      vertex " + cornerIndex1[cornerMap[n]]);
+	}
+	
+	// Now go through and map all the vertices between each corner
+	n = 0;
+	while(n < cornerMap.length - 1)
+	{
+		var nextCornerDist = 1;
+		
+		var vStart0 = cornerIndex0[n];
+		var vStart1 = cornerIndex1[cornerMap[n]];
+
+		// If one or more source corners weren't matched, increment n until we find one that was.
+		while(cornerIndex1[cornerMap[n + nextCornerDist]] === undefined)
+			nextCornerDist++;
+		
+		var vEnd0   = cornerIndex0[n + nextCornerDist] + 1;		
+		var vEnd1   = cornerIndex1[cornerMap[n + nextCornerDist]] + 1;
+		
+		var nextVertexMap;
+		var m;
+		
+		debugTrace("Matching vertices between source corners " + n + " - " + (n + nextCornerDist) + " and dest corners " + cornerMap[n] + " - " + (cornerMap[n + nextCornerDist]));
+		debugTrace("Matching source vertices " + vStart0 + " - " + (vEnd0 - 1) + " and " + vStart1 + " - " + (vEnd1 - 1));
+		// Chop off the last element because it will be the same as the first element we're about to add
+		nextVertexMap = matchVertices(normalizedVertexDistances0.slice(vStart0, vEnd0), 
+		                              normalizedVertexDistances1.slice(vStart1, vEnd1));
+		for(m = 0; m < nextVertexMap.length; m++)
+			if(nextVertexMap[m] !== undefined)
+				nextVertexMap[m] += vStart1;
+
+		vertexMap = vertexMap.slice(0, -1);
+		vertexMap = vertexMap.concat(nextVertexMap);
+		debugTrace("now the vertex map is " + vertexMap);
+		
+		n += nextCornerDist;
+	}
+	
+	debugTrace("Vertex mapping results:");
+	for(n = 0; n < vertexMap.length; n++)
+	{
+		debugTrace("Source vertex " + n + " -> dest vertex " + vertexMap[n]);
+	}
+	
+	debugTrace("------------ End matchShapeCorners() ----------------")
+	
+	var retStruct = {};
+	retStruct.cornerMap = cornerMap;
+	retStruct.vertexMap = vertexMap;
+	retStruct.pos0      = cornerPos0;
+	retStruct.index0    = cornerIndex0;
+	retStruct.pos1      = cornerPos1;
+	retStruct.index1    = cornerIndex1;
+	return retStruct;
+}
+
+tweenCompoundBezier = function(edges0, firstEdge0, edges1, firstEdge1, tweenDist)
+{
+	var n, m;
+	var adjustedEdges0 = rotateArray(edges0, -firstEdge0);
+	var adjustedEdges1 = rotateArray(edges1, -firstEdge1);
+	var bez0 = new CompoundBezier(adjustedEdges0, true);
+	var bez1 = new CompoundBezier(adjustedEdges1, true);
+	var normalizedVertexDistances0 = bez0.getNormalizedVertexDistances();
+	var normalizedVertexDistances1 = bez1.getNormalizedVertexDistances();
+	
+	//debugTrace("number of edges #0: " + edges0.length);
+	//debugTrace("number of edges #1: " + edges1.length);
+	//debugTrace("number of adjusted edges #0: " + adjustedEdges0.length);
+	//debugTrace("number of adjusted edges #1: " + adjustedEdges1.length);
+	
+	var cornerInfo = matchCornersAndVertices(bez0, bez1, normalizedVertexDistances0, normalizedVertexDistances1);
+	
+	var tweenEdges = [];
+
+	// Assemble a list of corners in the two edge lists
+	var cornerMap    = cornerInfo.cornerMap;
+	var vertexMap    = cornerInfo.vertexMap;
+	var cornerPos0   = cornerInfo.pos0;
+	var cornerIndex0 = cornerInfo.index0;
+	var cornerPos1   = cornerInfo.pos1;
+	var cornerIndex1 = cornerInfo.index1;
+
+/*	
+	// If both shapes have the same number of corners,
+	// combine the vertex arrays in a smart way, aligning corresponding corners
+	if(cornerPos0.length == cornerPos1.length)
+	{
+		//debugTrace("same number of corners: " + cornerPos0.length);
+		var cornerTween = [];
+		for(n = 0; n < cornerPos0.length; n++)
+		{
+			cornerTween[n] = (cornerPos0[n] + cornerPos0[n]) / 2;
+		}
+		var curCornerIndex = 0;
+		var bezIndex0 = 1;
+		var bezIndex1 = 1;
+		
+		for(curCornerIndex = 1; curCornerIndex < cornerTween.length; curCornerIndex++)
+		{
+			// If both shapes have the same number of vertices between these two corners, match them 1 to 1
+			var sectionLength0 = cornerIndex0[curCornerIndex] - cornerIndex0[curCornerIndex - 1];
+			var sectionLength1 = cornerIndex1[curCornerIndex] - cornerIndex1[curCornerIndex - 1];
+			
+			if(sectionLength0 === sectionLength1)
+			{
+				tweenEdges = tweenEdges.concat(makeSimpleTweenedEdges(bez0, cornerIndex0[curCornerIndex - 1], 
+				                                                      bez1, cornerIndex1[curCornerIndex - 1], 
+																	  sectionLength0, tweenDist));
+			}
+			else // Otherwise do a brute force tween of the section between these two corners
+			{
+				debugTrace("Different number of vertices between corners " + (curCornerIndex - 1) + " and " + curCornerIndex);
+				tweenEdges = tweenEdges.concat(makeBruteForceTweenedEdges(bez0, cornerIndex0[curCornerIndex - 1], cornerIndex0[curCornerIndex],
+																		  bez1, cornerIndex1[curCornerIndex - 1], cornerIndex1[curCornerIndex],
+																		  tweenDist, normalizedVertexDistances0, normalizedVertexDistances1));
+			}
+		}
+	}
+	else // the source and dest shapes don't have the same number of corners, so do a brute-force tween
+*/	
+	debugTrace("Tweening on a vertex map with length " + vertexMap.length);
+	n = 0;
+	while(n < vertexMap.length - 1)
+	{
+		lastVert = n + 1;
+		while(vertexMap[lastVert] === undefined)
+			lastVert++;
+		debugTrace("brute force tweening source " + n + "-" + lastVert + " -> " + vertexMap[n] + "-" + vertexMap[lastVert]);
+		tweenEdges = tweenEdges.concat(makeBruteForceTweenedEdges(bez0,           n,            lastVert,
+																  bez1, vertexMap[n], vertexMap[lastVert], 
+																  tweenDist, 
+																  normalizedVertexDistances0, 
+																  normalizedVertexDistances1));
+		n = lastVert;
+	}
+	
+	return tweenEdges;
+}
+
+makeTweenedEdge = function(bez0, bez1, tweenDist)
+{
+	debugTrace("--------------makeTweenedEdge-------------")
+	debugTrace("bez0: " + coords_toString(bez0.pointA));
+	debugTrace("      " + coords_toString(bez0.pointB));
+	debugTrace("      " + coords_toString(bez0.pointC));
+	debugTrace("bez1: " + coords_toString(bez1.pointA));
+	debugTrace("      " + coords_toString(bez1.pointB));
+	debugTrace("      " + coords_toString(bez1.pointC));
+	
+	// Let's tween the tangents rather than simply tweening all the control points
+	var t00 = {x: bez0.pointB.x - bez0.pointA.x, y: bez0.pointB.y - bez0.pointA.y};
+	var t01 = {x: bez0.pointB.x - bez0.pointC.x, y: bez0.pointB.y - bez0.pointC.y};
+	var t10 = {x: bez1.pointB.x - bez1.pointA.x, y: bez1.pointB.y - bez1.pointA.y};
+	var t11 = {x: bez1.pointB.x - bez1.pointC.x, y: bez1.pointB.y - bez1.pointC.y};
+	var tweenTan0 = tweenTangent(t00, t10, tweenDist);
+	var tweenTan2 = tweenTangent(t01, t11, tweenDist);
+	//debugTrace("makeTweenedEdge: tweening point A");
+	var tweenPt0 = tweenPoint(bez0.pointA, bez1.pointA, tweenDist);
+	//debugTrace("makeTweenedEdge: tweening point B");
+	var tweenPt2 = tweenPoint(bez0.pointC, bez1.pointC, tweenDist);
+	
+	debugTrace("makeTweenedEdge: Finding intersection point");
+	var tweenPt1 = getIntersectionPoint(tweenPt0, tweenTan0, tweenPt2, tweenTan2);
+	
+	if(tweenPt1 == INTERSECTION_OUTSIDE)
+	{
+		//debugTrace("MakeTweenedEdge: Error finding ctrl point in target (Intersection outside). Interpolating control point.")
+		//tweenPt1 = tweenPoint(bez0.pt1, bez1.pt1, tweenDist);
+		
+		// Get an array of edges to represent this section that's too complex for a single edge
+		debugTrace("makeTweenedEdge: calling makeCompoundEdge");
+		return makeCompoundEdge(tweenPt0, tweenTan0, tweenPt2, tweenTan2, bez0, bez1, tweenDist);
+	}
+
+	return [{pt0: tweenPt0, pt1: tweenPt1, pt2: tweenPt2}];
+	 
+	// Or use this one to simply tween all the control points
+	//return {pt0: tweenPoint(bez0.pt0, bez1.pt0, tweenDist),
+	//		pt1: tweenPoint(bez0.pt1, bez1.pt1, tweenDist),
+	//		pt2: tweenPoint(bez0.pt2, bez1.pt2, tweenDist)};
+}
+
+makeCubicEdge = function (pt0, tan0, pt3, tan3)
+{
+	var pt1 = {};
+	var pt2 = {};
+	var tanMultiplier = 0.66666;
+	var xDist = pt3.x - pt0.x;
+	var yDist = pt3.y - pt0.y;
+	var endPointDist = Math.sqrt(xDist * xDist + yDist * yDist);
+	
+	var tan0Normalized = normalizeVector(tan0);
+	var tan3Normalized = normalizeVector(tan3);
+	
+	var tan0Scaled = {x: tan0Normalized.x * tanMultiplier * endPointDist, 
+	                  y: tan0Normalized.y * tanMultiplier * endPointDist};
+	var tan3Scaled = {x: tan3Normalized.x * tanMultiplier * endPointDist, 
+	                  y: tan3Normalized.y * tanMultiplier * endPointDist};
+	
+	pt1.x = pt0.x + tan0Scaled.x * tanMultiplier;
+	pt1.y = pt0.y + tan0Scaled.y * tanMultiplier;
+	pt2.x = pt3.x + tan3Scaled.x * tanMultiplier;
+	pt2.y = pt3.y + tan3Scaled.y * tanMultiplier;
+	
+	//debugTrace("makeCubicEdge:");
+	//debugTrace("(" + pt0.x + ", " + pt0.y + ")");
+	//debugTrace("(" + pt1.x + ", " + pt1.y + ")");
+	//debugTrace("(" + pt2.x + ", " + pt2.y + ")");
+	//debugTrace("(" + pt3.x + ", " + pt3.y + ")");
+	
+	return {pt0: pt0, pt1: pt1, pt2: pt2, pt3: pt3};
+}
+
+makeCompoundEdge = function (pt0, tan0, pt4, tan4, _bezSource, _bezDest, tweenDist, vertDistStartSource, vertDistEndSource, vertDistStartDest, vertDistEndDest, recursionCount)
+{
+	if(recursionCount === undefined)
+		recursionCount = 0;
+	
+	var retArray = [];
+	var sourceBez = {};
+	var destEdge = {};
+	
+	var sourceStart;
+	var sourceEnd;
+	var destStart;
+	var destEnd;
+	var sourceMid;
+	var destMid;
+	
+	debugTrace("------- makeCompoundEdge(), recursion count " + recursionCount)
+	debugTrace("pt0  = " + coords_toString(pt0));
+	debugTrace("tan0 = " + coords_toString(tan0));
+	debugTrace("pt4  = " + coords_toString(pt4));
+	debugTrace("tan4 = " + coords_toString(tan4));
+	if(_bezSource instanceof Bezier)
+	{
+		debugTrace("type of bez passed: Bezier");
+		sourceBez = _bezSource;
+		destBez =   _bezDest;
+		if(vertDistStartSource === undefined)
+		{
+			debugTrace("vertDistStartSource was undefined");
+			sourceStart = destStart = 0;
+			sourceEnd = sourceBez.getLength();
+			destEnd = destBez.getLength();
+		}
+		else
+		{
+			debugTrace("vertDistStartSource was defined");
+			debugTrace("vertDistStartSource = " + vertDistStartSource);
+			debugTrace("vertDistEndSource   = " + vertDistEndSource);
+			debugTrace("vertDistStartDest   = " + vertDistStartDest);
+			debugTrace("vertDistEndDest     = " + vertDistEndDest);
+			sourceStart = vertDistStartSource * sourceBez.getLength();
+			sourceEnd   = vertDistEndSource   * sourceBez.getLength();
+			destStart   = vertDistStartDest   * destBez.getLength();			
+			destEnd     = vertDistEndDest     * destBez.getLength();			
+		}
+	}
+	else if(_bezSource instanceof CompoundBezier)
+	{
+		debugTrace("type of bez passed: CompoundBezier");
+		
+		// Make sourceStart, sourceEnd, destStart, and destEnd be indexes to the local bezier's length
+		var bezNum  = _bezSource.getIndexFromLength(vertDistStartSource);
+		var thisSectionLength = vertDistEndSource - vertDistStartSource;
+		var lengthMultiplier = _bezSource.length;
+		
+		debugTrace("Source bez length = " + _bezSource.beziers[bezNum].length);
+		debugTrace("thisSectionLength = " + thisSectionLength);
+		debugTrace("lengthMultiplier = " + lengthMultiplier);
+		
+		sourceBez   = _bezSource.beziers[bezNum];
+		sourceStart = vertDistStartSource * lengthMultiplier - _bezSource.startLength[bezNum];
+		sourceEnd   = vertDistEndSource * lengthMultiplier - _bezSource.startLength[bezNum];
+		
+		bezNum            = _bezDest.getIndexFromLength(vertDistStartDest);
+		thisSectionLength = vertDistEndDest - vertDistStartDest;
+		lengthMultiplier  = _bezDest.length;
+		
+		debugTrace("dest bez length = " + _bezDest.beziers[bezNum].length);
+		debugTrace("thisSectionLength = " + thisSectionLength);
+		debugTrace("lengthMultiplier = " + lengthMultiplier);
+		
+		destBez     = _bezDest.beziers[bezNum];
+		destStart   = vertDistStartDest * lengthMultiplier - _bezDest.startLength[bezNum];
+		destEnd     = vertDistEndDest * lengthMultiplier - _bezDest.startLength[bezNum];
+	}
+	
+	sourceMid = (sourceStart + sourceEnd) / 2;
+	destMid   = (destStart   + destEnd  ) / 2;
+		
+	debugTrace("pt0  = " + coords_toString(pt0));
+	debugTrace("tan0 = " + coords_toString(tan0));
+	debugTrace("pt4  = " + coords_toString(pt4));
+	debugTrace("tan4 = " + coords_toString(tan4));
+	
+	var pt1 = {};
+	var pt2 = {};
+	var pt3 = {};
+	var tan2Forward = {};
+	var tan2Back = {};
+
+	// Find the average of one tangent with the negative of the other, then reflect 
+	// that across the line between the two endpoints. That will be the tangent of 
+	// the midpoint.
+	var tanPt0 = {x: pt0.x + tan0.x / 2, y: pt0.y + tan0.y / 2};
+	var tanPt4 = {x: pt4.x + tan4.x / 2, y: pt4.y + tan4.y / 2};
+	debugTrace("tanPt0: " + coords_toString(tanPt0));
+	debugTrace("tanPt4: " + coords_toString(tanPt4));
+
+	if(1)  // The first try, algorithmically determining the midpoint and tangent without info from source and dest
+	{
+		// Find the midpoint between the two tangent points. That will be our pt2. 
+		// tan2 will be the the difference between the two tangent points.
+		//
+		// This formulation seems to work well on paper for all possible pairs of 
+		// endpoint tangents. Let's hope it works well in practice.
+
+		var tanPtAvg = tweenPoint(tanPt0, tanPt4, 0.5);
+		debugTrace("tanPtAvg: " + coords_toString(tanPtAvg));
+		
+		pt2 = tanPtAvg;
+		tan2Forward.x = tanPt4.x - tanPt0.x;
+		tan2Forward.y = tanPt4.y - tanPt0.y;
+		tan2Back.x = tanPt0.x - tanPt4.x;
+		tan2Back.y = tanPt0.y - tanPt4.y;
+	}
+	else // Find pt2 by tweening the midpoints of source and dest
+	{
+		debugTrace("sourceStart = " + sourceStart);
+		debugTrace("sourceMid   = " + sourceMid  );
+		debugTrace("sourceEnd   = " + sourceEnd  );
+		debugTrace("destStart   = " + destStart);
+		debugTrace("destMid     = " + destMid  );
+		debugTrace("destEnd     = " + destEnd  );
+		
+		var sourceMidPt = sourceBez.getPointFromLength(sourceMid);
+		var sourceMidTanForward = sourceBez.getTangentVectorByLength(sourceMid);
+		var sourceMidTanBack = scaleVector(sourceMidTanForward, -1);
+
+		var destMidPt = destBez.getPointFromLength(destMid);
+		var destMidTanForward = destBez.getTangentVectorByLength(destMid);
+		var destMidTanBack = scaleVector(destMidTanForward, -1);
+		
+		pt2         = tweenPoint(sourceMidPt, destMidPt, tweenDist);
+		tan2Back    = tweenTangent(sourceMidTanBack,    destMidTanBack,    tweenDist);
+		tan2Forward = tweenTangent(sourceMidTanForward, destMidTanForward, tweenDist);
+	}
+	
+	debugTrace("pt0         = " + coords_toString(pt0));
+	debugTrace("tan0        = " + coords_toString(tan0));
+	debugTrace("tan2Back    = " + coords_toString(tan2Back));	
+	debugTrace("pt2         = " + coords_toString(pt2));
+	debugTrace("tan2Forward = " + coords_toString(tan2Forward));	
+	debugTrace("tan4        = " + coords_toString(tan4));
+	debugTrace("pt4         = " + coords_toString(pt4));
+
+	debugTrace("makeCompoundEdge getting intersection point 1");
+	pt1 = getIntersectionPoint(pt0, tan0, pt2, tan2Back);
+	debugTrace("makeCompoundEdge getting intersection point 3");
+	pt3 = getIntersectionPoint(pt2, tan2Forward, pt4, tan4);
+	
+	if(pt1 == INTERSECTION_OUTSIDE)
+	{
+		//tweenCtrlPt[n] = tweenPoint(tweenVertices[n], tweenVertices[n + 1], tweenDist);
+		if(recursionCount < MAX_COMPOUND_EDGE_RECURSION)
+		{
+			debugTrace("Recursing on first half of compound edge");
+			retArray = retArray.concat(makeCompoundEdge(pt0, tan0, pt2, tan2Back, sourceBez, destBez, tweenDist, 
+														sourceStart / sourceBez.getLength(), sourceMid / sourceBez.getLength(), 
+														destStart / sourceBez.getLength(), destMid / destBez.getLength(), recursionCount + 1));
+		}
+		else 
+		{
+			debugTrace("ERROR: pt1 == INTERSECTION_OUTSIDE in makeCompoundEdge(). Defaulting to linear.")
+			retArray.push({pt0: pt0, pt2: pt2});
+			debugDrawLine(pt0.x, pt0.y, pt0.x + tan0.x, pt0.y + tan0.y);
+			debugDrawLine(pt2.x, pt2.y, pt2.x + tan2Back.x, pt2.y + tan2Back.y);
+		}
+	}
+	else
+		retArray.push({pt0: pt0, pt1: pt1, pt2: pt2});
+
+	if(pt3 == INTERSECTION_OUTSIDE)
+	{
+		//tweenCtrlPt[n] = tweenPoint(tweenVertices[n], tweenVertices[n + 1], tweenDist);
+		if(recursionCount < MAX_COMPOUND_EDGE_RECURSION)
+		{
+			debugTrace("Recursing on second half of compound edge");
+			retArray = retArray.concat(makeCompoundEdge(pt2, tan2Forward, pt4, tan4, sourceBez, destBez, tweenDist, 
+														sourceMid / sourceBez.getLength(), sourceEnd / sourceBez.getLength(),
+														destMid / destBez.getLength(), destEnd / destBez.getLength(), recursionCount + 1));
+		}
+		else
+		{
+			debugTrace("ERROR: pt3 == INTERSECTION_OUTSIDE in makeCompoundEdge(). Defaulting to linear.")
+			retArray.push({pt0: pt2, pt2: pt4});
+			debugDrawLine(pt2.x, pt2.y, pt2.x + tan2Forward.x, pt2.y + tan2Forward.y);
+			debugDrawLine(pt4.x, pt4.y, pt4.x + tan4.x, pt4.y + tan4.y);
+		}
+	}
+	else
+		retArray.push({pt0: pt2, pt1: pt3, pt2: pt4});
+
+	debugTrace("makeCompoundEdge results:");
+	for(var n = 0; n < retArray.length; n++)
+	{
+		debugTrace("(" + coords_toString(retArray[n].pt0) + ")");
+		debugTrace("(" + coords_toString(retArray[n].pt1) + ")");
+		debugTrace("(" + coords_toString(retArray[n].pt2) + ")\n");
+	}
+	return retArray;
+}
+
+tweenPoint = function(pt0, pt1, tweenDist)
+{
+	return {x: tweenValue(pt0.x, pt1.x, tweenDist), 
+			y: tweenValue(pt0.y, pt1.y, tweenDist)};
+}
+
+tweenValue = function(a, b, tweenDist)
+{
+	return a + (b - a) * tweenDist;
+}
+
+tweenTangent = function(t0, t1, tweenDist)
+{
+	debugTrace("tweenTangent input: " + t0.x + ", " + t0.y + "; " + t1.x + ", " + t1.y)
+	var magnitude0 = Math.sqrt(t0.x * t0.x + t0.y * t0.y);
+	var magnitude1 = Math.sqrt(t1.x * t1.x + t1.y * t1.y);	
+	debugTrace("magnitude0 = " + magnitude0);
+	debugTrace("magnitude1 = " + magnitude1);
+	var magnitudeTween = tweenValue(magnitude0, magnitude1, tweenDist);
+	debugTrace("magnitudeTween = " + magnitudeTween);	
+	
+	// Here are some modifiers to make larger mmagnitude have greater 
+	// influence on the tweened angle
+	var angle0Share = magnitude0 * (1 - tweenDist);
+	var angle1Share = magnitude1 * tweenDist;
+	var angleShareDivisor = angle0Share + angle1Share;
+	angle0Share /= angleShareDivisor;
+	angle1Share /= angleShareDivisor;
+	
+	var angle0 = Math.atan2(t0.y, t0.x);
+	var angle1 = Math.atan2(t1.y, t1.x);
+	var angleTween;
+	
+	debugTrace("angle0: " + (angle0 / Math.PI * 180) + " degrees");
+	debugTrace("angle1: " + (angle1 / Math.PI * 180) + " degrees");
+	
+	if(Math.abs(angle1 - angle0) >= Math.PI) // the two angles are closer to each other over the atan2 range boundary (+/- PI)
+	{
+		var angle1Phased;
+		if(angle0 < angle1)
+			angle1 = angle1 - Math.PI * 2;
+		else
+			angle1 = angle1 + Math.PI * 2;
+	}
+	
+	angleTween = angle0 * angle0Share + angle1 * angle1Share;
+	
+	if(angleTween > Math.PI)
+		angleTween -= 2 * Math.PI;
+	else if(angleTween <= -Math.PI)
+		angleTween += 2 * Math.PI;
+	
+	var retTan = {x: Math.cos(angleTween) * magnitudeTween, y: Math.sin(angleTween) * magnitudeTween};
+
+	debugTrace("Tweened tangent angles: " + (angle0 * 180 / Math.PI) + " -> " + (angle1 * 180 / Math.PI) + ": " + (angleTween * 180 / Math.PI) + " degrees");
+	debugTrace("                        " + coords_toString(retTan));	
+	
+	//debugTrace("Calculated tweened tangent: " + retTan.x + ", " + retTan.y);
+	
+	return retTan;
+
+	// or this one, which simply tweens the control points
+	//return tweenPoint(t0, t1, tweenDist);
+}
+
+makeSimpleTweenedEdges = function(bez0, startVert0, bez1, startVert1, sectionLength, tweenDist)
+{
+	var bezTween = []; // an array of arrays of edges
+	var tweenEdges = []; // the final list of edges to return
+	
+	debugTrace("makeSimpleTweenedEdges: Same number of vertices starting at vertex " + startVert0 + " and " + startVert1);
+	debugTrace("                        sectionLength = " + sectionLength);
+	for(var n = 0; n < sectionLength; n++)
+	{
+		//debugTrace("tweening source bez " + (cornerIndex0[curCornerIndex - 1] + n) + " to dest bez " + (cornerIndex1[curCornerIndex - 1] + n));
+		var curBez0 = bez0.beziers[startVert0 + n];
+		var curBez1 = bez1.beziers[startVert1 + n];
+		bezTween[n] = makeTweenedEdge(curBez0, curBez1, tweenDist);
+	}	
+	
+	if(sectionLength > 1)
+	{
+		// Make sure all the non-corner vertices remain smooth
+		for(var n = 1; n < sectionLength; n++)
+		{
+			// tanBack will be the negative of the actual back tangent for easier comparison
+			var prevEdge = bezTween[n - 1][bezTween[n - 1].length - 1];
+			var nextEdge = bezTween[n][0];
+			var tanBack    = {x: prevEdge.pt2.x - prevEdge.pt1.x, 
+			                  y: prevEdge.pt2.y - prevEdge.pt1.y};
+			var tanForward = {x: nextEdge.pt1.x - nextEdge.pt0.x, 
+			                  y: nextEdge.pt1.y - nextEdge.pt0.y};
+			var angleBack    = getAngle(tanBack);
+			var angleForward = getAngle(tanForward);
+			var angleDif     = Math.abs(angleBack - angleForward);
+
+			debugTrace("makeSimpleTweenedEdges: checking for a corner at " + coords_toString(nextEdge.pt0));
+			debugTrace("angleBack    = " + angleBack);
+			debugTrace("angleForward = " + angleForward);
+			debugTrace("angleDif     = " + angleDif);
+			
+			// if we've ended up with a corner, average out the two tangents to make the vertex smooth
+			// It's a corner if te two angles aren't [almost] the same.
+			// It could also be that they are close across the angle boundary (e.g. one is -179.99 degrees, the other is +179.99 degrees)
+			if(angleDif > CORNER_ANGLE_TOLERANCE / 2 &&
+			   angleDif < Math.PI * 2 - CORNER_ANGLE_TOLERANCE / 2)
+			{
+				debugTrace("makeSimpleTweenedEdges: made a corner at " + coords_toString(nextEdge.pt0));
+				tanForward.x = (tanForward.x + tanBack.x) / 2;
+				tanForward.y = (tanForward.y + tanBack.y) / 2;
+				tanBack = {x: -tanForward.x, y: -tanForward.y};
+				
+				var tanPrev0To1 = {x: prevEdge.pt1.x - prevEdge.pt0.x, y: prevEdge.pt1.y - prevEdge.pt0.y};
+				
+				// Get the new control point for the previous edge
+				var newPt1 = getIntersectionPoint(prevEdge.pt0, tanPrev0To1, prevEdge.pt2, tanBack);
+				
+				// Only modify the control point if getIntersectionPoint() was able to find a good one. Otherwise... oops?
+				if(newPt1 !== INTERSECTION_OUTSIDE)
+					prevEdge.pt1 = newPt1;
+				
+				var tanNext2To1 = {x: nextEdge.pt1.x - nextEdge.pt2.x, y: nextEdge.pt1.y - nextEdge.pt2.y};
+				
+				// Get the new control point for the next edge
+				newPt1 = getIntersectionPoint(nextEdge.pt0, tanForward, nextEdge.pt2, tanNext2To1);
+				
+				// Only modify the control point if getIntersectionPoint() was able to find a good one. Otherwise... oops?
+				if(newPt1 !== INTERSECTION_OUTSIDE)
+					nextEdge.pt1 = newPt1;
+			}
+		}	
+	}
+	
+	for(var n = 0; n < sectionLength; n++)
+	{
+		tweenEdges = tweenEdges.concat(bezTween[n]);
+	}	
+	return tweenEdges;
+}
+
+// Create an edge array representing a brute force tween of the indicated sections of the passed CompoundBeziers
+// That means that every vertex in the source and dest sections will have corresponding vertices in the 
+// tweened edge array. Little effort will be made to match vertices between the source and dest sections.
+
+makeBruteForceTweenedEdges = function(bez0, firstVert0, lastVert0, 
+                                      bez1, firstVert1, lastVert1, 
+									  tweenDist, normalizedVertexDistances0, normalizedVertexDistances1)
+{
+	var n;
+	var n0 = firstVert0;
+	var n1 = firstVert1;
+	var combinedVertexDistance = []; // a normalized parameter into just the section we're operating on
+	
+	debugTrace("Doing a brute force tween")
+	debugTrace("Source shape vertices " + firstVert0 + " to " + lastVert0);
+	debugTrace("Dest   shape vertices " + firstVert1 + " to " + lastVert1);
+
+	var firstVertDistTween = tweenValue(normalizedVertexDistances0[firstVert0], normalizedVertexDistances1[firstVert1], tweenDist);
+	var lastVertDistTween  = tweenValue(normalizedVertexDistances0[lastVert0], normalizedVertexDistances1[lastVert1], tweenDist);
+	var firstLastDif1 = normalizedVertexDistances1[lastVert1] - normalizedVertexDistances1[firstVert1];
+	var firstLastDif0 = normalizedVertexDistances0[lastVert0] - normalizedVertexDistances0[firstVert0];
+	
+	// Combine the vertex distance arrays
+	while(n0 < lastVert0 || n1 < lastVert1)
+	{
+		//debugTrace("n0 = " + n0 + ", n1 = " + n1);
+		//debugTrace("normalizedVertexDistances0[n0]: " + normalizedVertexDistances0[n0]);
+		//debugTrace("normalizedVertexDistances1[n1]: " + normalizedVertexDistances1[n1]);
+		var valToPush;
+		var valToPush0 = (normalizedVertexDistances0[n0] - normalizedVertexDistances0[firstVert0]) / firstLastDif0;
+		var valToPush1 = (normalizedVertexDistances1[n1] - normalizedVertexDistances1[firstVert1]) / firstLastDif1;
+		// if we've already added all the n0 distances or the n1 distance is smaller than the n0 distance
+		if(n0 >= normalizedVertexDistances0.length || valToPush1 < valToPush0)
+		{
+			// push a value normalized to the distance between the first and last tween vertices
+			valToPush = valToPush1;
+			//debugTrace("Adding vertex " + n1 + " from dest shape: " + valToPush)
+			n1++;
+		}
+		else
+		{
+			//debugTrace("valToPush = (normalizedVertexDistances0[n0] - normalizedVertexDistances0[firstVert0]) / firstLastDif0");
+			//debugTrace("valToPush = (" + normalizedVertexDistances0[n0] + " - " + normalizedVertexDistances0[firstVert0] + ") / " + firstLastDif0);
+			valToPush = valToPush0;
+			//debugTrace("Adding vertex " + n0 + " from source shape: " + valToPush)
+			n0++;
+		}
+				
+		// Only push this new value if it's sufficiently different from the previous one
+		if(combinedVertexDistance.length === 0 || 
+		   valToPush - combinedVertexDistance[combinedVertexDistance.length - 1] > SHAPE_TWEEN_INDEX_THRESHOLD)
+		{
+			//debugTrace("Pushing a new vertex in brute force tween")
+			//debugTrace("                    valToPush: " + valToPush);
+			//debugTrace("      previously pushed value: " + combinedVertexDistance[combinedVertexDistance.length - 1] );
+			//debugTrace("combinedVertexDistance.length: " + combinedVertexDistance.length);
+			combinedVertexDistance.push(valToPush);
+		}
+	}
+	//debugTrace("Pushing LAST vertex in brute force tween")
+	//debugTrace("      previously pushed value: " + combinedVertexDistance[combinedVertexDistance.length - 1] );
+	//debugTrace("combinedVertexDistance.length: " + combinedVertexDistance.length);
+	combinedVertexDistance.push(1);
+	debugTrace("combinedVertexDistance: " + combinedVertexDistance);
+	
+	var v0 = [];
+	var tan0Back = [];
+	var tan0Forward = [];
+	var v1 = [];
+	var tan1Back = [];
+	var tan1Forward = [];
+	var tanTweenForward = [];
+	var tanTweenBack = [];
+	var tweenCtrlPt = [];
+	var distFromPrevious0 = [];
+	var distFromPrevious1 = [];
+	var tweenVertices = [];
+	var tweenEdges = [];
+	var vertexDistance0 = [];
+	var vertexDistance1 = [];
+
+	// Make an array of all the endpoints in the tweened edges
+	for(n = 0; n < combinedVertexDistance.length; n++)
+	{
+		debugTrace("combinedVertexDistance " + n + ": " + combinedVertexDistance[n]);
+		vertexDistance0[n] = combinedVertexDistance[n] * firstLastDif0 + normalizedVertexDistances0[firstVert0];
+		debugTrace("Calculated tween distance " + vertexDistance0[n]);
+		v0[n] = bez0.getPointLinear(vertexDistance0[n]);
+		debugTrace("v0[" + n + "] = " + coords_toString(v0[n]));
+		if(n === 0)
+			distFromPrevious0[n] = 0;
+		else
+			distFromPrevious0[n] = Math.sqrt((v0[n].x - v0[n-1].x) * (v0[n].x - v0[n-1].x) + (v0[n].y - v0[n-1].y) * (v0[n].y - v0[n-1].y));
+		tan0Back[n] = bez0.getTangentVectorLinear(vertexDistance0[n], true);
+		tan0Forward[n] = bez0.getTangentVectorLinear(vertexDistance0[n], false);
+		tan0Back[n].x = -tan0Back[n].x;
+		tan0Back[n].y = -tan0Back[n].y;
+		vertexDistance1[n] = combinedVertexDistance[n] * firstLastDif1 + normalizedVertexDistances1[firstVert1];
+		v1[n] = bez1.getPointLinear(vertexDistance1[n]);
+		debugTrace("v1[" + n + "] = " + coords_toString(v1[n]));
+		if(v1[n][n-1] === undefined)
+			distFromPrevious1[n] = 0;
+		else
+			distFromPrevious1[n] = Math.sqrt((v1[n].x - v1[n][n-1].x) * (v1[n].x - v1[n][n-1].x) + (v1[n].y - v1[n][n-1].y) * (v1[n].y - v1[n][n-1].y));
+		tan1Back[n] = bez1.getTangentVectorLinear(vertexDistance1[n], true);
+		tan1Forward[n] = bez1.getTangentVectorLinear(vertexDistance1[n], false);
+		tan1Back[n].x = -tan1Back[n].x;
+		tan1Back[n].y = -tan1Back[n].y;
+	}
+	
+	// Trim all the tangents so they're of the correct magnitude, since we just added a bunch of points.
+	debugTrace("Trim tangents in source:");
+	trimTangents(v0, tan0Forward, tan0Back);
+	debugTrace("Trim tangents in dest:");
+	trimTangents(v1, tan1Forward, tan1Back);
+
+	// Tween the tangents
+	for(n = 0; n < combinedVertexDistance.length; n++)
+	{
+		debugTrace("source forward tangent " + n + ": " + coords_toString(tan0Forward[n]));
+		debugTrace("source back    tangent " + n + ": " + coords_toString(tan0Back[n]));
+		debugTrace("dest   forward tangent " + n + ": " + coords_toString(tan1Forward[n]));
+		debugTrace("dest   back    tangent " + n + ": " + coords_toString(tan1Back[n]));
+		
+		debugTrace("TWEENING FORWARD TANGENT ON EDGE " + n);
+		tanTweenForward[n] = tweenTangent(tan0Forward[n], tan1Forward[n], tweenDist);
+		debugTrace("TWEENING BACK TANGENT ON EDGE " + (n - 1));
+		tanTweenBack[n]    = tweenTangent(tan0Back[n], tan1Back[n], tweenDist);
+		debugTrace("DONE TWEENING TANGENTS");
+		debugTrace("tanTweenBack[" + n + "] = " + coords_toString(tanTweenBack[n]));
+		debugTrace("tanTweenForward[" + n + "] = " + coords_toString(tanTweenForward[n]));
+
+		// Make sure curves don't become corners
+		if(!bez0.linearPointIsCorner(vertexDistance0[n]) && !bez1.linearPointIsCorner(vertexDistance1[n]) /*&& n !== 0 && n !== combinedVertexDistance.length - 1*/)
+		{
+			debugTrace("Averaging tangents on vertex " + n + " to maintain smooth curve");
+			debugTrace("forward angle before avg: " + (getAngle(tanTweenForward[n]) * 180 / Math.PI));
+			debugTrace("  -back angle before avg: " + (getAngle(scaleVector(tanTweenBack[n], -1)) * 180 / Math.PI));
+			
+			var forwardMagnitude = Math.sqrt(tanTweenForward[n].x * tanTweenForward[n].x + tanTweenForward[n].y * tanTweenForward[n].y);
+			var backMagnitude = Math.sqrt(tanTweenBack[n].x * tanTweenBack[n].x + tanTweenBack[n].y * tanTweenBack[n].y);
+
+			tanTweenForward[n].x = (-tanTweenBack[n].x + tanTweenForward[n].x) / 2;
+			tanTweenForward[n].y = (-tanTweenBack[n].y + tanTweenForward[n].y) / 2;
+
+			var avgMagnitude = Math.sqrt(tanTweenForward[n].x * tanTweenForward[n].x + tanTweenForward[n].y * tanTweenForward[n].y);
+
+			// Make sure the tangents don't change magnitude
+			tanTweenBack[n].x = -tanTweenForward[n].x * backMagnitude / avgMagnitude;
+			tanTweenBack[n].y = -tanTweenForward[n].y * backMagnitude / avgMagnitude;
+			tanTweenForward[n].x *= forwardMagnitude / avgMagnitude;
+			tanTweenForward[n].y *= forwardMagnitude / avgMagnitude;
+
+			debugTrace("forward angle after avg: " + (getAngle(tanTweenForward[n]) * 180 / Math.PI));
+			debugTrace("  -back angle after avg: " + (getAngle(scaleVector(tanTweenBack[n], -1)) * 180 / Math.PI));
+		}
+		
+		debugTrace("tweened forward tangent " + n + ": " + coords_toString(tanTweenForward[n]));
+		debugTrace("tweened back    tangent " + n + ": " + coords_toString(tanTweenBack[n]));
+		
+		tweenVertices[n]   = tweenPoint(v0[n], v1[n], tweenDist);		
+	}
+	
+	var compoundEdge; // only used if we're trying to do an inflected curve to cover up ap an awkward tween
+	
+	// Find middle control points for all the sections
+	for(n = 0; n < combinedVertexDistance.length - 1; n++)
+	{
+		compoundEdge = undefined; // empty out the array
+		/*
+		var TANGENT_MULTIPLIER = 10;
+		debugDrawLine(tweenVertices[n].x, 
+					  tweenVertices[n].y, 
+					  tweenVertices[n].x + tanTweenForward[n].x * TANGENT_MULTIPLIER, 
+					  tweenVertices[n].y + tanTweenForward[n].y * TANGENT_MULTIPLIER);
+		debugDrawLine(tweenVertices[n+1].x, 
+					  tweenVertices[n+1].y, 
+					  tweenVertices[n+1].x + tanTweenBack[n+1].x * TANGENT_MULTIPLIER, 
+					  tweenVertices[n+1].y + tanTweenBack[n+1].y * TANGENT_MULTIPLIER);
+		*/
+		debugTrace("makeBruteForceTweenedEdges " + n + ": getting intersection point between " + n + " and " + (n + 1));
+		debugTrace("makeBruteForceTweenedEdges tweenVertices[" + n + "] = " + coords_toString(tweenVertices[n]));
+		debugTrace("makeBruteForceTweenedEdges tanTweenForward[" + n + "] = " + coords_toString(tanTweenForward[n]));
+		debugTrace("makeBruteForceTweenedEdges tweenVertices[" + (n + 1) + "] = " + coords_toString(tweenVertices[n + 1]));
+		debugTrace("makeBruteForceTweenedEdges tanTweenBack[" + (n + 1) + "] = " + coords_toString(tanTweenBack[n + 1]));
+		tweenCtrlPt[n] = getIntersectionPoint(tweenVertices[n], tanTweenForward[n], tweenVertices[n + 1], tanTweenBack[n + 1]);
+		
+		if(tweenCtrlPt[n] == INTERSECTION_OUTSIDE)
+		{
+			//debugTrace("Error finding ctrl point in target: Intersection outside. Defaulting to linear edge.")
+			//tweenCtrlPt[n] = tweenPoint(tweenVertices[n], tweenVertices[n + 1], tweenDist);
+			
+			// Get multiple edges to fill in the curve that can't be expressed with a single one
+			debugTrace("Error finding control point. Trying to get a compound edge.")
+
+			// First let's scale the tangent magnitudes so the line doesn't get all scrunched up.
+			var tweenEdgeDistX = tweenVertices[n + 1].x - tweenVertices[n].x;
+			var tweenEdgeDistY = tweenVertices[n + 1].y - tweenVertices[n].y;
+			var tweenEdgeDist = Math.sqrt(tweenEdgeDistX * tweenEdgeDistX + tweenEdgeDistY * tweenEdgeDistY);
+			
+			// we're going to scale the tangents by the current edge endpoint 
+			// difference divided by the average of that of the source and dest
+			
+			/*var tanScaleModifier = tweenEdgeDist / tweenValue(distFromPrevious0[n + 1], distFromPrevious1[n + 1], tweenDist);
+			
+			tanTweenForward[n] = scaleVector(tanTweenForward[n], tanScaleModifier);
+			tanTweenBack[n + 1] = scaleVector(tanTweenBack[n + 1], tanScaleModifier);
+			*/
+			
+			compoundEdge = makeCompoundEdge(tweenVertices[n], tanTweenForward[n], tweenVertices[n + 1], tanTweenBack[n + 1], 
+			                                bez0, bez1, tweenDist, vertexDistance0[n], vertexDistance0[n + 1], vertexDistance1[n], vertexDistance1[n + 1]);
+			tweenEdges = tweenEdges.concat(compoundEdge);
+		}
+		else
+		{
+			debugTrace("in makeBruteForceTweenedEdges() tweenCtrlPt[n] = " + coords_toString(tweenCtrlPt[n]));
+			tweenEdges.push({pt0: tweenVertices[n], pt1: tweenCtrlPt[n], pt2: tweenVertices[n + 1]});
+		}
+	}
+	return tweenEdges;
+}
+
+trimTangents = function(vArray, tanForwardArray, tanBackArray)
+{
+	// Adjust all the tangents to have the right magnitude, given the points we've 
+	// added. This is helpful to get a good tween on the tangents.
+	for(var n = 0; n < vArray.length - 1; n++)
+	{
+		debugTrace("trimTangent for edge " + n);
+		debugTrace("trimTangent           vArray[n] = " + coords_toString(vArray[n]));
+		debugTrace("trimTangent  tanForwardArray[n] = " + coords_toString(tanForwardArray[n]));
+		debugTrace("trimTangent       vArray[n + 1] = " + coords_toString(vArray[n + 1]));
+		debugTrace("trimTangent tanBackArray[n + 1] = " + coords_toString(tanBackArray[n + 1]));
+		debugTrace("trim forward from " + coords_toString(tanForwardArray[n]));
+		debugTrace("trim back    from " + coords_toString(tanBackArray[n + 1]));
+		var ctrlPt = getIntersectionPoint(vArray[n], tanForwardArray[n], vArray[n + 1], tanBackArray[n + 1]);
+		if(ctrlPt === INTERSECTION_PARALLEL)
+		{
+			debugTrace("          (parallel)");
+			ctrlPt = tweenPoint(vArray[n], vArray[n+1], 0.5);; // Make it a straight edge
+		}
+		else if(ctrlPt === INTERSECTION_OUTSIDE)
+		{
+			debugTrace("Error! This shouldn't be possible! INTERSECTION_OUTSIDE in trimTangents(): " + n);
+			ctrlPt = tweenPoint(vArray[n], vArray[n+1], 0.5);
+		}
+		tanForwardArray[n]  = {x: ctrlPt.x - vArray[n].x,     y: ctrlPt.y - vArray[n].y};
+		tanBackArray[n + 1] = {x: ctrlPt.x - vArray[n + 1].x, y: ctrlPt.y - vArray[n + 1].y};
+		debugTrace("    forward   to " + coords_toString(tanForwardArray[n]));
+		debugTrace("    back      to " + coords_toString(tanBackArray[n + 1]));
+	}
+	
+}
+
+rotateArray = function(_ar, _n)
+{
+	debugTrace("Rotating array with " + _ar.length + " entries " + _n + " spaces.")
+	var retArray = [];
+	
+    if (_n < 0)
+        _n = _ar.length + (_n + 1) % _ar.length - 1; // Make n positive -- -1 -> _ar.length -1, etc.
+	
+	for(var n = 0; n < _ar.length; n++)
+	{
+		//debugTrace("Rotating array: " + n + " to " + ((n + _n) % _ar.length))
+		retArray[(n + _n) % _ar.length] = _ar[n];
+	}
+	return retArray;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// function tween_element(source_element, source_frame, dest_element, dest_frame)
+//
+// Takes as parameters a source and destination element and the frames that they're on.
+// Moves the source element to be linearly in-between its original location and the
+// destination element's location.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+tween_element = function(source_element, source_frame, dest_element, tween_dist, dest_element_pivots)
+{		
+	// Some variables to reduce dereferencing
+	var source_element_matrix = source_element.matrix;
+	var dest_element_matrix = dest_element.matrix;
+	var pivot_src;
+	var pivot_dest;
+	var global_pivot_src;
+	var global_pivot_dest;
+	var global_pivot_tween;
+	var ideal_global_pivot;
+	var tween_matrix;
+		
+	var dest_frame = source_frame + source_element.layer.frames[source_frame].duration
+	
+	//fl.trace("tween distance is " + tween_dist);
+	if(tween_dist == 1.0)  // If the tween distance is 1 then we just copy the dest element's transform matrix
+	{
+		tween_matrix  = dest_element_matrix;
+	}
+	else
+	{
+		// Get the transform components for the source and dest element matrices
+		var first_trans_comp  = new transform_components(source_element_matrix);
+		var second_trans_comp = new transform_components(dest_element_matrix);
+
+		// tween the first 
+		first_trans_comp.tween(second_trans_comp, tween_dist);
+		tween_matrix = first_trans_comp.to_matrix();
+	}
+	
+	// Find the pivot of the dest element
+
+	pivot_dest = dest_element_pivots.pivot;
+	global_pivot_dest = dest_element_pivots.global_pivot;
+	
+	select_element(source_element, source_frame);
+	// Set the source pivot to match that of the dest element
+	doc.setTransformationPoint(pivot_dest);
+	global_pivot_src = get_global_pivot();	
+		
+	if("shape" == source_element.elementType && source_element.isGroup)
+	{
+		// Get its inverted transform matrix
+		var undo_transform = fl.Math.invertMatrix(source_element_matrix);
+
+		// remove the transform from this object (but leave the translation intact)
+		doc.transformSelection(undo_transform.a, undo_transform.b, undo_transform.c, undo_transform.d);
+	
+		// Set the transform on this object to the tween transform
+		doc.transformSelection(tween_matrix.a, tween_matrix.b, tween_matrix.c, tween_matrix.d);
+
+		var corrected_tween_matrix = doc.selection[0].matrix;
+		corrected_tween_matrix.tx = source_element_matrix.tx + (dest_element_matrix.tx - source_element_matrix.tx) * tween_dist;
+		corrected_tween_matrix.ty = source_element_matrix.ty + (dest_element_matrix.ty - source_element_matrix.ty) * tween_dist;
+		doc.selection[0].matrix = corrected_tween_matrix;
+		
+		// Set the pivot point to match the destination
+		doc.setTransformationPoint(pivot_dest);
+		
+		//Correct the translation
+		global_pivot_tween = get_global_pivot();
+		ideal_global_pivot = {x: global_pivot_src.x + (global_pivot_dest.x - global_pivot_src.x) * tween_dist,
+		                      y: global_pivot_src.y + (global_pivot_dest.y - global_pivot_src.y) * tween_dist }
+		                          
+		corrected_tween_matrix.tx += ideal_global_pivot.x - global_pivot_tween.x;
+		corrected_tween_matrix.ty += ideal_global_pivot.y - global_pivot_tween.y;
+		doc.selection[0].matrix = corrected_tween_matrix;
+
+		// Once again, set the pivot point to match the destination
+		doc.setTransformationPoint(pivot_dest);
+
+		global_pivot_tween = get_global_pivot();
+		
+		return;
+	}
+	
+	// Now we've taken care of shapes so we must be dealing with a symbol instance
+	
+	if(tween_dist == 1.0) // If the tween distance is 1 then we just copy the dest element's transform matrix
+	{
+		source_element.matrix = tween_matrix;
+	}
+	else
+	{
+		tween_matrix.tx = source_element_matrix.tx + (dest_element_matrix.tx - source_element_matrix.tx ) * tween_dist;
+		tween_matrix.ty = source_element_matrix.ty + (dest_element_matrix.ty - source_element_matrix.ty ) * tween_dist;
+
+		source_element.matrix = tween_matrix;
+		doc.setTransformationPoint(pivot_dest);
+		global_pivot_tween = get_global_pivot();	
+
+		// Figure out how far off from the ideal translation point we are
+		// We want to make it so the pivot point ends up linearly tweened between the two keys.
+
+		var ideal_pivot_loc = 
+		{
+			x: global_pivot_src.x + (global_pivot_dest.x - global_pivot_src.x) * tween_dist,
+			y: global_pivot_src.y + (global_pivot_dest.y - global_pivot_src.y) * tween_dist
+		};
+
+		var dist_from_ideal = {x: ideal_pivot_loc.x - global_pivot_tween.x,
+				       y: ideal_pivot_loc.y - global_pivot_tween.y}
+
+		//fl.trace("source location:      " + global_pivot_src.x + ", " + global_pivot_src.y);
+		//fl.trace("tween location:       " + global_pivot_tween.x + ", " + global_pivot_tween.y);
+		//fl.trace("ideal tween location: " + ideal_pivot_loc.x + ", " + ideal_pivot_loc.y);
+		//fl.trace("dest location:        " + global_pivot_dest.x + ", " + global_pivot_dest.y);
+		//fl.trace("ideal difference:     " + dist_from_ideal.x + ", " + dist_from_ideal.y);
+
+		// Correct the translation now that we've corrected the pivot point
+
+		tween_matrix.tx += dist_from_ideal.x;
+		tween_matrix.ty += dist_from_ideal.y;
+
+		source_element.matrix = tween_matrix;
+	}
+
+	// Now set the pivot point to its correct location
+	doc.setTransformationPoint(pivot_dest);
+	
+	// If this is a symbol set to single-frame, set the start frame to be the same as dest
+	if("instance" == source_element.elementType)
+		if("symbol" == source_element.instanceType)
+			if("graphic" == source_element.symbolType)
+				if("single frame" == source_element.loop)
+					if("graphic" == dest_element.symbolType)
+						if(tween_dist >= 0.5)
+						{
+							//fl.trace("source element = " + source_element.libraryItem.name);
+							source_element.firstFrame = dest_element.firstFrame;
+						}
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// function get_shape_dimensions(el)
+//
+// Get the dimensions of the untransformed shape.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+get_shape_dimensions = function(el, frame)
+{
+	var dimensions = {};
+	
+	// Let's reset its transform matrix so we can test its width and height
+	// Get its transform matrix and also its inverted matrix
+	var original_transform = el.matrix;
+	var undo_transform = fl.Math.invertMatrix(el.matrix);
+	var original_x = el.matrix.tx;
+	var original_y = el.matrix.ty;
+
+	// select this object
+	var old_selection = doc.selection;	
+	var old_frame = timeline.currentFrame;
+	//fl.trace("selecting element on frame " + frame);
+	select_element(el, frame);
+	if(undefined === doc.selection[0])
+	{
+		//fl.trace("error selecting " + el.elementType + " in get_shape_dimensions()");
+	}
+
+	// undo all the transformations on this object
+	doc.transformSelection(undo_transform.a, undo_transform.b, undo_transform.c, undo_transform.d);
+
+	dimensions.x = el.width;
+	dimensions.y = el.height;
+	
+	// redo all the transformations on this object
+	doc.transformSelection(original_transform.a, original_transform.b, original_transform.c, original_transform.d);
+	doc.moveSelectionBy({x: original_x - el.matrix.tx, y: original_y - el.matrix.ty});
+	
+	timeline.currentFrame = old_frame;
+	//fl.trace("3: switched to frame " + old_frame);
+	doc.selection = old_selection;
+	
+	return dimensions;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// function find_corresponding_element(src_element, dest_frame, allow_reflection)
+//
+// Returns an instance of the same library item as src_element but in dest_frame.  If
+// allow_reflection is false then it won't match elements that are instances of the same 
+// library item but are have opposite reflection from src_element.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+var MATCH_STRENGTH_REFLECTION = 0x100;
+var MATCH_STRENGTH_START_FRAME = 0x200;
+var MATCH_STRENGTH_Z_LEVEL = 0x400;
+var MATCH_STRENGTH_LAYER = 0x800;
+var MATCH_STRENGTH_DISALLOW = -0x8000;
+var MATCH_STRENGTH_DISTANCE_NUMERATOR = 0xff;
+
+find_corresponding_element = function(src_element, src_frame, dest_frame, allow_reflection)
+{
+	var candidate_strength = 0;
+	
+	if(dest_frame === undefined || src_frame === undefined || src_element === undefined)
+		return undefined;
+		
+	var src_dimensions = {};
+	
+	if("shape" == src_element.elementType)
+	{
+		if(src_element.isGroup)
+		{
+			// For now we won't allow groups.  It never worked very well anyway.
+			//fl.trace("skipping a group");
+			return undefined;
+			
+			// Save the width and height
+			//fl.trace("trying to find the dimensions of a source shape in find_corresponding_element()");
+			//src_dimensions = get_shape_dimensions(src_element, src_frame);
+			//fl.trace("matching to a shape");
+		}
+		else
+		{
+			//fl.trace("Trying to match a raw shape");
+			src_dimensions.x = src_dimensions.y = -1;
+		}
+	}
+	else if("instance" == src_element.elementType)
+	{
+		src_dimensions.x = src_dimensions.y = -1;
+		//fl.trace("matching to an instance");
+	}
+	else 
+	{
+		//fl.trace("not matchable");
+		return undefined;
+	}
+	    
+	// if the x and y scale of a symbol are both positive or both negative then it isn't reflected.
+	var src_transform = new transform_components(src_element.matrix);
+	var is_reflected = src_transform.is_reflected();
+	
+	//fl.trace("source skew difference: " + Math.abs(src_transform.skew_x - src_transform.skew_y));
+
+	//fl.trace("source transform:\n" + src_transform);
+
+	//fl.trace("number of dest elements: " + dest_frame.elements.length);
+
+	// find an element that is an instance of the same library item as src_element
+	var return_candidate;
+	var new_item_idx;
+	for(new_item_idx = 0; new_item_idx < dest_frame.elements.length; new_item_idx++)
+	{
+		var this_is_reflected;
+		var is_a_candidate;
+		
+		var dest_element = dest_frame.elements[new_item_idx];
+		
+		is_a_candidate = false;
+		
+		//fl.trace("trying to match item " + new_item_idx + ": " + dest_element.elementType);
+		
+		// Make sure this is a library instance
+		if("instance" == dest_element.elementType && "instance" == src_element.elementType)
+		{
+			//fl.trace("comparing an instance: " + dest_element.libraryItem.name);
+			// If this is an instance of the same library item as src_element then we're done.
+			if(dest_element.libraryItem == src_element.libraryItem)
+			{
+				is_a_candidate = true;
+				//fl.trace("found a symbol match");
+			}
+		}
+		else if("shape" == dest_element.elementType && "shape"== src_element.elementType)
+		{
+			if(dest_element.isGroup && src_element.isGroup)
+			{
+				//fl.trace("comparing a shape");
+				// We're dealing with a shape or a group.
+				// Reset its transform matrix so we can test its width and height
+				//fl.trace("trying to find the dimensions of a dest shape in find_corresponding_element()");
+				var dest_dimensions = get_shape_dimensions(dest_element, dest_frame.startFrame);
+				
+				//fl.trace("From frame " + (src_frame + 1) + " to frame " + (dest_frame.startFrame + 1) + ":");
+				//fl.trace("trying to match " + src_dimensions.x + ", " + src_dimensions.y);
+				//fl.trace("           with " + dest_dimensions.x + ", " + dest_dimensions.y);
+				
+				if(Math.abs(dest_dimensions.x - src_dimensions.x) <= SHAPE_SIZE_TOLERANCE &&
+				   Math.abs(dest_dimensions.y - src_dimensions.y) <= SHAPE_SIZE_TOLERANCE )
+				{
+					is_a_candidate = true;
+					//fl.trace("found a shape match");
+				}
+			}
+			else if (!dest_element.isGroup && !src_element.isGroup)
+			{
+				// Let's just say that any raw shape is a match to any raw shape
+				//fl.trace("corresponding "+ dest_element);
+				return dest_element;
+			}
+				
+		}
+		
+		//fl.trace("checking for candidacy");
+		if(is_a_candidate)
+		{
+			var dest_transform = new transform_components(dest_element.matrix);
+
+			//figure out if this element is reflected or not
+			this_is_reflected = dest_transform.is_reflected();
+			
+			var this_candidate_strength = 0;
+			
+			if(this_is_reflected == is_reflected)
+				this_candidate_strength = MATCH_STRENGTH_REFLECTION;
+			else if(!allow_reflection)
+				this_candidate_strength = MATCH_STRENGTH_DISALLOW;
+			if(dest_element.firstFrame == src_element.firstFrame && src_element.loop == "single frame")
+				this_candidate_strength |= MATCH_STRENGTH_START_FRAME;
+			else if(dest_element.firstFrame - dest_frame == src_element.firstFrame - src_frame && (src_element.loop == "loop" || src_element.loop == "play once"))
+				this_candidate_strength |= MATCH_STRENGTH_START_FRAME;	
+			if(dest_element.depth == src_element.depth)
+				this_candidate_strength |= MATCH_STRENGTH_Z_LEVEL;
+			if(dest_element.layer == src_element.layer)
+				this_candidate_strength |= MATCH_STRENGTH_LAYER;
+			if(dest_element.x - src_element.x + dest_element.y - src_element.y < 1)
+				this_candidate_strength += MATCH_STRENGTH_DISTANCE_NUMERATOR;
+			else this_candidate_strength += MATCH_STRENGTH_DISTANCE_NUMERATOR / (dest_element.x - src_element.x + dest_element.y - src_element.y);
+			
+			//fl.trace("dest_element.firstFrame = " + dest_element.firstFrame);
+			//fl.trace("src_element.firstFrame = " + src_element.firstFrame);
+			//fl.trace("src_element.loop = " + src_element.loop);
+			//fl.trace("Candidate #" + new_item_idx + " strength: " + this_candidate_strength.toString(16));
+			
+			// This element is a candidate.  Remember this one in case we don't find a better one
+			if(this_candidate_strength > candidate_strength)
+			{
+				return_candidate = dest_element;
+				candidate_strength = this_candidate_strength;
+			}
+
+			//fl.trace("dest skew difference: " + Math.abs(dest_transform.skew_x - dest_transform.skew_y));
+		
+			//fl.trace("return candidate: " /*+ return_candidate.libraryItem.name*/);
+			//fl.trace(is_reflected ? "source reflected" : "source not reflected");
+			//fl.trace(this_is_reflected ? "dest reflected" : "dest not reflected");
+			//fl.trace("source transform:\n" + src_transform);
+			//fl.trace("dest transform:\n" + dest_transform);
+
+
+			//if(is_reflected == this_is_reflected)
+			//{
+			//	// A perfect match.  Return this element.
+			//	return return_candidate;
+			//}
+		}
+		//fl.trace("done checking for candidacy");		
+	}
+	
+	// If we made it to this point then we didn't find an exact match.  Return whatever we did find
+	// (it'll still be undefined if we didn't find anything).
+	if(candidate_strength > 0)
+		return return_candidate;
+		
+	return undefined;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// function find_corresponding_elements(src_elements, dest_elements_pivots)
+//
+// Assembles an array of elements in the next keyframes
+// Unfortunately this is currently ~O(n^2).  I'd like to optimize this at some point....
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+find_corresponding_elements = function(src_elements, dest_elements_pivots)
+{
+	dest_elements = [];
+	dest_elements.length = src_elements.length;
+	
+	//fl.trace("number of elements: " + src_elements.length);
+	
+	var src_length = src_elements.length;
+	var current_frame_num = timeline.currentFrame;
+	
+	for(var el = 0; el < src_length; el++)
+	{
+		//fl.trace("Starting on element " + el);
+		
+		// Only do stuff if this isn't an ungrouped shape
+		if("shape" != src_elements[el].elementType || src_elements[el].isGroup)
+		{
+			current_src_element = src_elements[el];
+			//fl.trace("getting dest frame on " + src_elements[el].layer.name);
+			
+			// There must be some way to not have to do all this dereferencing every time through the loop.  Maybe it doesn't matter, though?
+			var layer_frames = current_src_element.layer.frames;
+			var current_frame = layer_frames[current_frame_num];
+			var dest_frame = layer_frames[current_frame.startFrame + current_frame.duration];
+			
+			// Only do stuff if there's a next keyframe
+			if(undefined !== dest_frame)
+			{
+				
+				// Find the corresponding element in the next keyframe
+				//fl.trace("try looking for a match for element " + el);
+				dest_elements[el] = find_corresponding_element(current_src_element, current_frame_num, dest_frame, false);
+				//fl.trace("Done looking for a match for element " + el);
+				
+				// Now load up the dest element details
+				if(undefined !== dest_elements[el])
+				{
+					dest_elements_pivots[el] = {};
+					//fl.trace("selecting an object of type " + dest_elements[el].elementType);
+					select_element(dest_elements[el], dest_frame.startFrame);
+					dest_elements_pivots[el].pivot = doc.getTransformationPoint();
+					dest_elements_pivots[el].global_pivot = get_global_pivot();
+					if("shape" == dest_elements[el].elementType)
+					{
+						//fl.trace("trying to find the dimensions of a dest shape");
+						dest_elements_pivots[el].dimensions = get_shape_dimensions(dest_elements[el], dest_frame.startFrame);
+					}
+				}
+				
+				// DEBUG: Now make sure we've found the appropriate elements 
+				
+				//if("instance" == src_elements[el].elementType)
+				//{
+				//	if(undefined == dest_elements[el])
+				//	{
+				//	//fl.trace("couldn't find a match for " + src_elements[el].libraryItem.name);
+				//	}
+				//	else
+				//	//fl.trace(el.toString() + ": found " + src_elements[el].libraryItem.name + " linked to " + dest_elements[el].libraryItem.name +
+				//		         " at " + dest_elements[el].matrix.tx + ", " + dest_elements[el].matrix.ty);
+				//}
+				//else
+				//{
+				//	//fl.trace("source isn't an instance");
+				//}
+				
+			}
+			else
+			{
+				//fl.trace("Undefined destination frame");
+			}
+		}
+	}
+	
+	//fl.trace("finishing up with the finding");
+	return dest_elements;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// set_keyframe_same_selection = function()
+//
+// Creates a keyframe on every layer that has a selection, and keeps the same selection as before.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+set_keyframe_same_selection = function()
+{
+	var initial_selection = [];
+	var layers = timeline.layers;
+	var current_frame = timeline.currentFrame;
+	var this_frame;
+	
+	// save the current selection
+	var original_selection = doc.selection;
+	
+	var layer, element;
+	var elements;
+	//var new_frame_selection = [];
+	
+	var layer_selection = [];
+	var layer_selected = [];
+	
+	//prof.mark("starting to loop layers");
+	
+	//fl.trace("selection length: " + doc.selection.length);
+	var counter = 0;
+	for(layer = 0; layer < layers.length; layer++)
+	{
+		layer_selected[layer] = false;
+		
+		var this_layer = layers[layer];
+		this_frame = this_layer.frames[current_frame];
+		
+		// Only do stuff if this layer hasn't ended yet
+		if(undefined !== this_frame)
+		{
+			elements = this_frame.elements;
+			for(element = 0; element < elements.length; element++)
+			{	
+				// if this frame is in a tween, only do stuff if it is the start frame of the tween
+				if(this_frame.startFrame == current_frame || this_frame.tweenType == "none")
+				{
+					// save whether each element is selected
+					initial_selection[counter] = elements[element].selected;
+	
+					//fl.trace("layer " + this_layer.name + "'s tween: " + this_frame.tweenType);
+	
+					// remember that there was something selected on this layer
+					// Only do this, though, if the current frame isn't on a locked or invisible layer
+					if(initial_selection[counter] && !this_layer.locked && this_layer.visible )
+					{
+						layer_selected[layer] = true;
+						//fl.trace("layer " + this_layer.name + " is selected.");
+					}
+				}
+				counter++;
+			}
+			if(layer_selected[layer])
+			{
+				//fl.trace("selecting layer " + layer + ", \"" + layers[layer].name + "\"");
+				// Add this frame to the layer selection
+				layer_selection.push(layer);
+				layer_selection.push(current_frame);
+				layer_selection.push(current_frame + 1);
+			}
+		}
+	}
+	
+	//fl.trace("selection length: " + doc.selection.length);
+
+	//prof.mark("creating keyframes");
+
+	// clear the frame selection
+	timeline.currentLayer = 0;
+
+	// make sure only the current frame is selected
+	// (added to keep it from tweening an element that's in a motion tween.  This can happen when 
+	// going from Edit Multiple Frames mode back to normal mode.
+	timeline.setSelectedFrames(current_frame, current_frame);
+	doc.selectNone();
+	timeline.setSelectedFrames(layer_selection);
+	
+
+	// create a keyframe on every layer with a selected element
+	var original_selected_layer = timeline.currentLayer;
+	for(layer = 0; layer < layer_selected.length; layer++)
+	{
+		if(layer_selected[layer])
+		{
+			timeline.currentLayer = layer;
+			
+			// make sure only the current frame is selected
+			// (added to keep it from tweening an element that's in a motion tween.  This can happen when 
+			// going from Edit Multiple Frames mode back to normal mode.
+			//timeline.setSelectedFrames(current_frame, current_frame + 1);
+			
+			// Only create a new keyframe if this one isn't already a keyframe
+			if(current_frame != timeline.layers[layer].frames[current_frame].startFrame)
+			{
+				//fl.trace("creating a keyframe on layer layer " + layer + ", \"" + layers[layer].name + "\"");
+				timeline.insertKeyframe();
+			}
+		}
+	}
+
+	//fl.trace("selection length: " + doc.selection.length);
+
+	//prof.mark("done creating keyframes");
+
+	timeline.currentLayer = original_selected_layer;
+
+	// update the selection to match what it was before
+	var new_selection = [];
+	
+	// clear the frame selection
+	doc.selectNone();
+	
+	//prof.mark("Figuring out new selection");
+	
+	counter = 0;
+	for(layer = 0; layer < layers.length; layer++)
+	{
+		this_frame = layers[layer].frames[current_frame];
+
+		// Only do stuff if this layer hasn't ended yet
+		if(undefined !== this_frame)
+		{
+		
+			elements = this_frame.elements;
+			elements_length = elements.length;
+			for(element = 0; element < elements_length; element++)
+			{	
+				// assemble a list of what should be selected
+				if(initial_selection[counter])
+				{
+					new_selection.push(elements[element]);
+				}
+				counter++;
+			}
+		}
+	}
+	
+	
+	// Now apply the new selection
+	timeline.setSelectedFrames(layer_selection);
+	doc.selectNone();
+	doc.selection = new_selection;
+
+	//prof.mark("Done keyframing");
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// get_shape_info(src_selection)
+//
+// Returns an array of objects with info about shape/hint pairs
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+get_shape_info = function(src_selection, frameNum)
+{
+	if(!src_selection || src_selection.length === 0)
+		return [];
+	
+	shape_array = [];
+	var shape_info = {layer: src_selection[0].layer, shape: undefined, hint: []};
+	
+	//fl.trace("getting shape info, frame " + frameNum);
+
+	for(var n = 0; n < src_selection.length; n++)
+	{
+		if(src_selection[n].layer != shape_info.layer)
+		{
+			// New layer.  Clear the shape_info struct.
+			shape_info.layer = src_selection[n].layer;
+			shape_info.shape = undefined;
+			shape_info.hint = [];
+		}
+		
+		// If this element is a raw shape
+		if(src_selection[n].elementType == "shape" && !src_selection[n].isGroup)
+		{
+			shape_info.shape = src_selection[n];
+			
+			// Now see if there's a parent layer with a tween hint symbol on it
+			
+			var parent = shape_info.layer.parentLayer;
+			if(parent != null && parent.layerType == "guide")
+			{
+				var parent_elements = parent.frames[frameNum].elements;
+				for(var m = 0; m < parent_elements.length; m++)
+				{
+					if(parent_elements[m].elementType == "instance" && parent_elements[m].libraryItem.name.indexOf(SHAPE_HINT_NAME_PREFIX) == 0)
+					{
+						shape_info.hint.push(parent_elements[m]);
+					}
+				}
+			}
+		}
+		else if(src_selection[n].elementType == "instance" && src_selection[n].libraryItem.name.indexOf(SHAPE_HINT_NAME_PREFIX) == 0)
+		{
+			shape_info.hint.push(src_selection[n]);
+		}
+		
+		// Sort the shape hint array
+		shape_info.hint.sort(function(a, b){ if(a.libraryItem.name < b.libraryItem.name) return -1; else return 1;});
+		
+		// If the shape info struct is full, add it to the array
+		if(shape_info.hint.length != 0 && shape_info.shape !== undefined)
+		{
+			// Add this shape to the shape array
+			shape_array.push(shape_info);
+			
+			//fl.trace("added a shape to tween on layer \"" + shape_info.layer.name + "\", with hint on \"" + shape_info.hint.layer.name + "\"");
+
+			// Create a new object for subsequent shapes
+			shape_info = {layer: src_selection[n].layer, shape: undefined, hint: []};
+			
+		}
+	}
+	return shape_array;
+}
+
+/////////////////////////////////////////////////////////////////////////
+// save_edit_place()
+//
+// Remembers where the user is currently editing-in-place
+/////////////////////////////////////////////////////////////////////////
+
+save_edit_place = function()
+{
+	var edit_stack = [];
+	var edit_stack_entry;
+	
+	//fl.trace("saving edit place");
+
+	edit_stack_entry = {};
+	edit_stack_entry.frame = doc.getTimeline().currentFrame;
+	edit_stack_entry.selection = doc.selection;
+	edit_stack.push(edit_stack_entry);
+	//fl.trace("initial frame: " + edit_stack_entry.frame);
+	
+	//fl.trace("initial timeline's name: " + doc.getTimeline().name);
+	//fl.trace("initial core timeline's name: " + doc.timelines[doc.currentTimeline].name);
+	while(doc.getTimeline().name != doc.timelines[doc.currentTimeline].name)
+	{
+		doc.exitEditMode();
+		var currentTimeline = doc.getTimeline();
+		var currentLayer = currentTimeline.layers[currentTimeline.currentLayer];
+		var currentFrame = currentLayer.frames[currentTimeline.currentFrame];
+		if(currentTimeline.currentFrame != currentFrame.startFrame && currentFrame.tweenType != "none")
+		{
+			//fl.trace("save_edit_place: correcting frame number back to " + currentFrame.startFrame);
+			currentTimeline.currentFrame = currentFrame.startFrame;
+		}
+		edit_stack_entry = {};
+		edit_stack_entry.object = doc.selection[0];
+		edit_stack_entry.frame = currentTimeline.currentFrame;
+		edit_stack.push(edit_stack_entry);
+
+		//fl.trace("added " + edit_stack_entry.object.libraryItem.name + " to the edit stack");
+		
+		//fl.trace("exited back to " + doc.getTimeline().name + ", now stack length is " + edit_stack.length);
+	}
+	
+	edit_stack.push(doc.currentTimeline);
+	
+	//fl.trace("edit stack length: " + edit_stack.length);
+	return edit_stack;
+}
+
+/////////////////////////////////////////////////////////////////////////
+// restore_edit_place(edit_Stack)
+//
+// Remembers where the user is currently editing-in-place
+/////////////////////////////////////////////////////////////////////////
+
+restore_edit_place = function(edit_stack)
+{
+	var edit_stack_entry;
+	
+	//fl.trace("restoring edit place");
+	
+	doc.currentTimeline = edit_stack.pop();
+	//fl.trace("set currentTimeline to " + doc.timelines[doc.currentTimeline].name);
+	
+	while(doc.getTimeline().name != doc.timelines[doc.currentTimeline].name)
+	{
+		doc.exitEditMode();
+	}
+	
+	while(edit_stack.length > 1)
+	{
+		edit_stack_entry = edit_stack.pop();
+		var elementFrameNum = edit_stack_entry.frame;
+		if(edit_stack_entry.object)
+		{
+			var elementFrame = edit_stack_entry.object.layer.frames[elementFrameNum];
+			//fl.trace("element is " + edit_stack_entry.object.libraryItem.name)
+			//fl.trace("element layer is " + edit_stack_entry.object.layer.name)
+			//fl.trace("element frame number = " + elementFrameNum);
+			//fl.trace("Tween type is " + elementFrame.tweenType);
+			//fl.trace("Start frame is = " + elementFrame.startFrame);
+
+			doc.getTimeline().currentFrame = elementFrameNum;
+			//fl.trace("about to set selection in " + doc.getTimeline().name);
+			//fl.trace("about to select " + edit_stack_entry.object.libraryItem.name + " on frame " + edit_stack_entry.frame);
+			doc.selection = [edit_stack_entry.object];
+			//fl.trace("re-editing " + doc.selection[0].libraryItem.name + " on frame " + edit_stack_entry.frame);
+			doc.enterEditMode("inPlace");
+		}
+	}
+	
+	edit_stack_entry = edit_stack.pop();
+	doc.getTimeline().currentFrame = edit_stack_entry.frame;
+	//fl.trace("final frame: " + edit_stack_entry.frame);
+	doc.selection = [];
+	
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// MAIN
+//
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+auto_tween = function(active_doc, tween_dist)
+{
+	doc = active_doc;
+	
+	//fl.outputPanel.clear();
+	
+	//fl.trace("tween distance " + tween_dist);
+	
+	if(doc != null)
+	{
+		//prof = new Profiler();
+		//prof.mark("start");
+
+		timeline = doc.getTimeline();
+		
+		fl.setActiveWindow(doc);
+		
+		var selectionRect = doc.getSelectionRect()
+		prog = new ProgBar((selectionRect.left + selectionRect.right) / 2,
+		                   (selectionRect.top + selectionRect.bottom) / 2);
+		
+		// Create a keyframe here if there isn't one already, but keep the same selection as before
+		set_keyframe_same_selection();
+		
+		var src_selection = doc.selection;
+		
+		if(src_selection.length !== 0)
+		{
+			//doc.livePreview = false;
+
+			var src_frame_num = timeline.currentFrame;
+			
+			// Get info about all the shapes in the source selection
+			//fl.trace("getting src shape info on " + src_frame_num);
+			var src_shapes = get_shape_info(src_selection, src_frame_num);
+		
+			var dest_elements_pivots = [];
+			var dest_selection = find_corresponding_elements(src_selection, dest_elements_pivots);
+			
+			//prof.mark("found elements");
+			
+			var frame_selection = timeline.getSelectedFrames(); 
+			timeline.setSelectedFrames([]); // Deselect all frames
+			
+			var src_selection_length = src_selection.length;
+			
+			//prof.mark("found elements");
+			
+			// First let's deal with any raw shapes so that we don't move 
+			// shape hints before the shapes they're hinting
+			prog.setProgress(0);
+			for(var x = 0; x < src_shapes.length; x++)
+			{
+				var dest_frame_num = src_shapes[x].layer.frames[src_frame_num].duration + src_shapes[x].layer.frames[src_frame_num].startFrame;
+				
+				// Try to find a shape element in the next keyframe
+				//fl.trace("getting dest shape info on " + dest_frame_num);
+				var dest_shapes = get_shape_info(src_shapes[x].layer.frames[dest_frame_num].elements, dest_frame_num );
+						
+				// If we found a destination shape, tween 'em.
+				if(dest_shapes[0] !== undefined)
+					tween_shape_quad(src_shapes[x], dest_shapes[0], src_frame_num, tween_dist);
+					
+				prog.setProgress((x + 1) / Number(src_shapes.length));
+			}
+			
+			// Now tween all the non-shape elements
+			prog.setProgress(0);
+			for(x = 0; x < src_selection_length; x++)
+			{
+				if(undefined !== dest_selection[x])
+				{
+					//alert("tweening element " + x);
+					tween_element(src_selection[x], src_frame_num, dest_selection[x], tween_dist, dest_elements_pivots[x]);
+					//alert("blah");
+					prog.setProgress((x + 1) / Number(src_selection_length));
+				}
+			}
+			
+			//prof.mark("tweened elements");
+			
+			// Update the display
+			// This bit is just a workaround for a display bug introduced in the Flash 10.0.2 update
+			document.setSelectionRect({left:-1000, top:-1000, right:-990, bottom:-990});	
+			
+			timeline.setSelectedFrames(frame_selection); // Reselect frames that were selected at the beginning
+			
+			// Go through the saved selection in the source frame, remove all
+			// the raw shapes, and replace them with the new ones that are 
+			// there now.
+			for(x = 0; x < src_selection_length; x++)
+			{
+				if(undefined !== src_selection[x] && 
+				   src_selection[x].elementType == "shape" && 
+				   !src_selection[x].isGroup)
+				{
+					// remove this element from the array
+					src_selection.splice(x, 1);
+				}
+			}
+			for(x = 0; x < src_shapes.length; x++)
+			{
+				src_selection = src_selection.concat(get_shape_elements(src_shapes[x].layer, src_frame_num));	
+			}
+			
+			doc.selectNone();
+			doc.selection = src_selection;
+
+			//doc.livePreview = true;
+			
+			prog.end();
+			
+			//fl.trace("autotween " + (tween_dist * 100) + "%");
+		
+			//prof.mark("done");
+			//fl.trace(prof);
+		} // if src_selection.length != 0
+	}
+}

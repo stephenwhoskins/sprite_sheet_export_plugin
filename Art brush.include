@@ -1,0 +1,4356 @@
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// Art Brush.include
+// By David Hernston
+// Last modified September 26, 2025
+// v5.3
+//
+// Include file for the Art Brush and the Distribute Symbol Along Path
+// commands.
+//
+// v5.3   Small change to adapt to changes in the API functionality of
+//        distributeToLayers
+// v5.2   Added coords_toString()
+// v5.1   Improved the handling of corners and the boundaries between
+//        3-slice regions.
+// v5.0   Added 3-slice scaling. Improved rendering when the stroke
+//        curve causes quadratic brush curves to break. Improved the
+//        algorithm that maps the brush edges onto the stroke's
+//        curve. 
+// v4.0   Eliminated trace statements and made it export the Brush SWF 
+//        only if there are actually brushes in the file.
+// v3.18  Made line color mode the default
+// v3.16  Fixed a bug in the handling of endcaps. Looks much better now.
+// v3.11  Added a confirmation when applying a brush to multiple strokes.
+//        Also changed the behavior of the panel so it will highlight a
+//        brush correctly even if it has been moved to a different
+//        folder in the library.
+// v3.10  Greatly improved how well it works with crossed lines. Now the
+//        stroke will follow the path of the line as closely as possible, 
+//        preferring a straight path at a crossing over a bent one. Also 
+//        made the previous change work a little better, only adding the
+//        data to the file when the button is pressed, not every time the 
+//        user switches to that file. 
+// v3.9   Added "Art Brush Use Panel Settings". Also added persistent
+//        color mode stored in the file itself. So when you return to a 
+//        file the panel will return to the color mode it was in last
+//        time you were editing that file.
+// v3.8.1 Bug fix for the scale strokes command.
+// v3.8   Added "Art brush scale strokes" command.
+// v3.7.1 Changed behavior so the original line layer is hidden in the 
+//        brush stroke symbol. 
+// v3.7   Panel now auto-loads when switching to a new document
+// v3.6   Improved corner handling, giving much more true outside corners
+// v3.5   Added end cap functionality. Rock!
+// v3.4   Bug fixes
+// v3.3   Reorganized the panel to have a less wasteful layout. Added
+//        a help screen. 
+// v3.2   Fixed some bugs and added several buttons to the panel: break
+//        to line, break to brush stroke, delete brush
+// v3.1   Added "reapply globally" command. Also, tooltips in the panel.
+// v3.0   Finished integration with art brush panel
+// v2.3   Integration with the art brush panel. Added ability to get color
+//        from the source line
+// v2.2   Fixed the handling of paths in Drawing Objects
+// v2.1   Fixed the handling of grouped paths
+// v2.0   Made all the brush strokes be inside symbols
+// v1.4.2 fixed a bug that prevented working with paths with no stroke.
+// v1.4.1 made the recolor version work in CS3 (and perhaps earlier versions).
+//        It won't detect line thickness, though, so you're stuck with a
+//        thickness of 1.
+// v1.4   fixed corner rendering to look more natural 
+// v1.3   Added line thickness sensitivity
+// v1.1   Added the ability to add vertices to the brush stroke to make it
+// follow the path almost perfectly
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+//debugTrace("include brush test"); 
+
+var DEBUG = false; // Set to true for debug output (traces and tangent lines)
+
+var FLASH_CS4 = 10;
+
+var MAX_EDGE_SUBDIVISION = 2;        // Max number of recursions when subdividing an edge
+var LINEAR_THRESHOLD = 1e-13;        // coefficients below this will be considered 0
+var CORNER_DISTANCE_TOLERANCE = 1e-10; // distance outside which to clamp vertices to corners for the sake of avoiding floating point precision problems
+var CORNER_ANGLE_TOLERANCE = 0.02;   // angles this close to each other should be considered colinear
+var VERTEX_ADDITION_PRECISION_THRESHOLD = 1e-5;
+var ENDPOINT_PRECISION_THRESHOLD = 1e-5;
+var PARALLEL_TANGENT_THRESHOLD = 1e-5; // How close to zero the determinant has to be to consider two tangents parallel
+
+var USE_CUBIC_SUBDIVISION = true;   // whether to use cubic or linear patches when MAX_EDGE_SUBDIVISION is reached
+
+var DUMMY_TRANSPARENCY = "#12345600";
+var BRUSH_STROKE_SYMBOL_TYPE = "graphic";
+var BRUSH_STROKE_SYMBOL_REGISTRATION = "center";
+var BRUSH_STROKE_LAYER_NAME = "brush stroke";
+var PATH_LAYER_NAME = "brush path";
+var BRUSH_STROKE_NAME_COUNT_PADDING = 5;
+var BRUSH_STROKE_LIBRARY_PATH = "_brush_strokes";
+var BRUSH_STROKE_NAME_PREFIX = "BrushStroke_";
+var BRUSH_NAME_PREFIX = "_brush_";
+var ART_BRUSH_PANEL_NAME = "Art Brush Panel";
+var DEFAULT_BRUSH_FOLDER = "_brushes";
+
+var LAYER_NAME_BRUSH_ART = "Brush Art";
+var LAYER_NAME_3_SLICE_MIDDLE = "3-Slice Boundaries";
+var LAYER_NAME_STROKE_EXTENT = "Stroke Path";
+
+// IDs for storing data in the document or symbols or whatever
+var ID_BRUSH_STROKE_COUNT = "ART_BRUSH_STROKE_COUNT";
+var ID_BRUSH_STROKE_SOURCE = "ART_BRUSH_STROKE_SOURCE";
+var ID_BRUSH_STROKE_DIRECTION = "ART_BRUSH_STROKE_DIRECTION";
+var ID_BRUSH_STROKE_RECOLOR = "ART_BRUSH_STROKE_RECOLOR";
+
+// values for metadata
+var STROKE_DIRECTION_FORWARD = "forward";
+var STROKE_DIRECTION_REVERSE = "reverse";
+var STROKE_RECOLOR_YES = "recolor_yes";
+var STROKE_RECOLOR_NO = "recolor_no";
+var STROKE_RECOLOR_USE_LINE = "recolor_use_line";
+
+// values for recolor parameter
+var RECOLOR_NO           = 0;
+var RECOLOR_YES          = 1;
+var RECOLOR_USE_LINE     = 2;
+var RECOLOR_USE_PREVIOUS = 3;
+
+var UNTITLED_STRING = "Untitled";
+var UNTITLED_SYMBOL_NAME = "Symbol";
+var NAME_SEPARATOR = "_";
+
+// How the tool should handle corners
+var CORNER_POINTY = 1;
+var CORNER_CUT    = 2;
+var CORNER_ROUND  = 3;
+var CORNER_STYLE = CORNER_POINTY;
+
+var NOT_A_CORNER = -1; // used in addEdgeToDrawingPath() to keep track of which vertices correspond to corners in the original path
+
+var INCOMPATIBLE_BRUSH_WARNING_1 = "Warning! Your brush symbol (";
+var INCOMPATIBLE_BRUSH_WARNING_2 = 
+") seems to have more than just simple shapes on the first frame of the first layer. \
+It may not work as you expect. For best results you should break apart any symbols, \
+groups, and drawing objects in your brush symbol.";
+var SHAPE_WITH_MATRIX_WARNING_1 = "Warning! Your brush symbol (";
+var SHAPE_WITH_MATRIX_WARNING_2 = 
+") might have a little glitch. Make sure you only have simple shapes on the first \
+frame of the first layer. Make sure you deselect all art in the brush symbol and \
+break apart any groups, symbols, or drawing objects.";
+var BRUSH_HAS_NO_ART_WARNING = "Warning: brush symbol contained no raw art on its first layer, first frame";
+
+// Whether the line layer inside the brush stroke symbol should be visible when
+// the tool is done
+var LINE_LAYER_VISIBLE = false;
+
+var MULTI_STROKE_CONFIRM_MSG_1 = "Applying ";
+var MULTI_STROKE_CONFIRM_MSG_2 = " brush strokes. Continue?";
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+debugTrace = function(msg)
+{
+	if(DEBUG)
+		fl.trace(msg);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Draw a simple line on the stage, inside a new group
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+debugDrawLine = function(x1, y1, x2, y2)
+{
+	if(DEBUG)
+	{
+		fl.trace("debugDrawLine(" + x1 + ", " + y1 + " to " + x2 + ", " + y2 + ");")
+		var debugPath = fl.drawingLayer.newPath();
+
+		// Create a line from x1, y1 to x2, y2
+		debugPath.addPoint(x1, y1);
+		debugPath.addPoint(x2, y2);
+
+		// Watch out! This could screw up other stuff if you need whatever's selected to remain selected
+		doc.selectNone();
+		doc.group(); // create an empty group and put this shape in it
+		debugPath.makeShape();
+		doc.exitEditMode();
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// coords_toString = function(coords)
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+coords_toString = function(coords)
+{
+	if(coords !== undefined)
+		return "" + coords.x + ", " + coords.y;
+	else return "undefined";
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// A generic array rotate function
+// Copied from http://stackoverflow.com/questions/1985260/javascript-array-rotate
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+Array.prototype.rotate = (function() 
+{
+	// save references to array functions to make lookup faster
+	var push = Array.prototype.push,
+		splice = Array.prototype.splice;
+
+	return function(count) 
+	{
+		var len = this.length >>> 0; // convert to uint
+		count = count >> 0; // convert to int
+
+		// convert count to value in range [0, len)
+		count = ((count % len) + len) % len;
+
+		// use splice.call() instead of this.splice() to make function generic
+		push.apply(this, splice.call(this, 0, count));
+		return this;
+	};
+})();
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Class ProgBar
+//
+// A class for displaying a progress bar (0 to 100%)
+// Copied from "auto tween.include"
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+function ProgBar(x, y)
+{
+	if(!x && !y)
+	{
+		x = y = 0;
+	}
+	//debugTrace("progbar at " + x + ", " + y);
+	this.center_x = x;
+	this.center_y = y;
+	this.scale = 1 / fl.getDocumentDOM().zoomFactor;
+	fl.drawingLayer.beginDraw(true);
+}
+
+ProgBar.prototype.end = function()
+{
+	fl.drawingLayer.beginFrame();  // Clear the drawing
+	fl.drawingLayer.endDraw();
+}
+
+ProgBar.prototype.setLocation = function(x, y)
+{
+	this.center_x = x;
+	this.center_y = y;
+	this.scale = 1 / fl.getDocumentDOM().zoomFactor;
+}
+
+ProgBar.prototype.drawRect = function(x1, y1, x2, y2)
+{
+	var n;
+	var start;
+	var end;
+	if(Math.abs(x1 - x2) > Math.abs(y1 - y2))
+	{
+		// X is bigger than y, so iterate over y
+		start = Math.min(y1, y2);
+		end = Math.max(y1, y2);
+		for(n = start; n < end; n += this.scale)
+		{
+			fl.drawingLayer.moveTo(x1, n);
+			fl.drawingLayer.lineTo(x2, n);
+		}
+	}
+	else
+	{
+		// Y is bigger than X, so iterate over X
+		start = Math.min(x1, x2);
+		end = Math.max(x1, x2);
+		for(n = start; n < end; n += this.scale)
+		{
+			fl.drawingLayer.moveTo(n, y1);
+			fl.drawingLayer.lineTo(n, y2);
+		}
+	}
+
+}
+
+
+ProgBar.prototype.setProgress = function(newProg)
+{
+	// Frist make sure the new progress percentage is within range: 0 <= prog <= 1
+	if(newProg > 1)
+		newProg = 1;
+	else if (newProg < 0)
+		newProg = 0;
+
+	//debugTrace("progress: " + (newProg * 100.0) + "%");
+
+	var PROG_WIDTH = 200;
+	var PROG_HEIGHT = 10;
+
+	fl.drawingLayer.beginFrame();
+	fl.drawingLayer.setColor(0xffffff);  // white
+	fl.drawingLayer.moveTo(this.center_x - this.scale * (PROG_WIDTH + 1), this.center_y - this.scale * (PROG_HEIGHT + 1));
+	fl.drawingLayer.lineTo(this.center_x - this.scale * (PROG_WIDTH + 1), this.center_y + this.scale * (PROG_HEIGHT + 1));
+	fl.drawingLayer.lineTo(this.center_x + this.scale * (PROG_WIDTH + 1), this.center_y + this.scale * (PROG_HEIGHT + 1));
+	fl.drawingLayer.lineTo(this.center_x + this.scale * (PROG_WIDTH + 1), this.center_y - this.scale * (PROG_HEIGHT + 1));
+	fl.drawingLayer.lineTo(this.center_x - this.scale * (PROG_WIDTH + 1), this.center_y - this.scale * (PROG_HEIGHT + 1));
+	fl.drawingLayer.setColor(0x000000);  // black
+	fl.drawingLayer.moveTo(this.center_x - this.scale * (PROG_WIDTH + 2), this.center_y - this.scale * (PROG_HEIGHT + 2));
+	fl.drawingLayer.lineTo(this.center_x - this.scale * (PROG_WIDTH + 2), this.center_y + this.scale * (PROG_HEIGHT + 2));
+	fl.drawingLayer.lineTo(this.center_x + this.scale * (PROG_WIDTH + 2), this.center_y + this.scale * (PROG_HEIGHT + 2));
+	fl.drawingLayer.lineTo(this.center_x + this.scale * (PROG_WIDTH + 2), this.center_y - this.scale * (PROG_HEIGHT + 2));
+	fl.drawingLayer.lineTo(this.center_x - this.scale * (PROG_WIDTH + 2), this.center_y - this.scale * (PROG_HEIGHT + 2));
+
+	fl.drawingLayer.setColor(0x0000ff);  // blue
+
+	var START_X = this.center_x - (this.scale * PROG_WIDTH);
+	this.drawRect(START_X                                        , this.center_y - this.scale * PROG_HEIGHT,
+				  START_X + this.scale * PROG_WIDTH * 2 * newProg, this.center_y + this.scale * PROG_HEIGHT);
+
+	fl.drawingLayer.endFrame();
+}
+
+/////////////////////////////////////////////////////////////////////////
+// save_edit_place()
+//
+// Remembers where the user is currently editing-in-place
+/////////////////////////////////////////////////////////////////////////
+
+save_edit_place = function()
+{
+	var edit_stack = [];
+	var edit_stack_entry;
+
+	//debugTrace("saving edit place");
+
+	edit_stack_entry = {};
+	edit_stack_entry.frame = doc.getTimeline().currentFrame;
+	edit_stack_entry.selection = doc.selection;
+	edit_stack.push(edit_stack_entry);
+	//debugTrace("initial frame: " + edit_stack_entry.frame);
+
+	//debugTrace("initial timeline's name: " + doc.getTimeline().name);
+	//debugTrace("initial core timeline's name: " + doc.timelines[doc.currentTimeline].name);
+	while(doc.getTimeline().name != doc.timelines[doc.currentTimeline].name)
+	{
+		doc.exitEditMode();
+		edit_stack_entry = {};
+		edit_stack_entry.object = doc.selection[0];
+		edit_stack_entry.frame = doc.getTimeline().currentFrame;
+		edit_stack.push(edit_stack_entry);
+
+		//debugTrace("added " + edit_stack_entry.object.libraryItem.name + " to the edit stack");
+
+		//debugTrace("exited back to " + doc.getTimeline().name + ", now stack length is " + edit_stack.length);
+	}
+
+	edit_stack.push(doc.currentTimeline);
+
+	//debugTrace("edit stack length: " + edit_stack.length);
+	return edit_stack;
+}
+
+/////////////////////////////////////////////////////////////////////////
+// restore_edit_place(edit_Stack)
+//
+// Remembers where the user is currently editing-in-place
+/////////////////////////////////////////////////////////////////////////
+
+restore_edit_place = function(edit_stack)
+{
+	var edit_stack_entry;
+
+	//debugTrace("restoring edit place");
+
+	doc.currentTimeline = edit_stack.pop();
+	//debugTrace("set currentTimeline to " + doc.timelines[doc.currentTimeline].name);
+
+	while(doc.getTimeline().name != doc.timelines[doc.currentTimeline].name)
+	{
+		doc.exitEditMode();
+	}
+
+	while(edit_stack.length > 1)
+	{
+		edit_stack_entry = edit_stack.pop();
+		doc.getTimeline().currentFrame = edit_stack_entry.frame;
+		//debugTrace("about to set selection in " + doc.getTimeline().name);
+		//debugTrace("about to select " + edit_stack_entry.object.libraryItem.name + " on frame " + edit_stack_entry.frame);
+		if(edit_stack_entry.object)
+		{
+			doc.selection = [edit_stack_entry.object];
+			//debugTrace("re-editing " + doc.selection[0].libraryItem.name + " on frame " + edit_stack_entry.frame);
+			doc.enterEditMode("inPlace");
+		}
+	}
+
+	edit_stack_entry = edit_stack.pop();
+	doc.getTimeline().currentFrame = edit_stack_entry.frame;
+	//debugTrace("final frame: " + edit_stack_entry.frame);
+	doc.selection = [];
+
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// function apply_transform(matrix, point)
+//
+// Applies a transform matrix to a point and returns the transformed point
+// Copied from "auto tween.include"
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+apply_transform = function(matrix, point)
+{
+	// The matrix is of the form
+	//
+	//  a  b 
+	//  c  d 
+	//  tx ty
+	//
+	// so that x' = ax + cy + tx 
+	// and     y' = bx + dy + ty
+	//
+	// See http://www.senocular.com/flash/tutorials/transformmatrix/ for details.
+
+	var transformed_point = {};
+	transformed_point.x = matrix.a * point.x + matrix.c * point.y + matrix.tx;
+	transformed_point.y = matrix.b * point.x + matrix.d * point.y + matrix.ty;
+	//transformed_point.x = point.x + matrix.tx;
+	//transformed_point.y = point.y + matrix.ty;
+	//transformed_point.x = matrix.a * transformed_point.x + matrix.c * transformed_point.y;
+	//transformed_point.y = matrix.b * transformed_point.x + matrix.d * transformed_point.y;
+
+	return transformed_point;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Return true if the passed matrix is an identity matrix
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+isIdentityMatrix = function(mat)
+{
+	return mat.tx === 0 && mat.ty === 0 && mat.a === 1 && mat.b === 0 && mat.c === 0 && mat.d === 1;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Return the inverse of the passed matrix
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+invertMatrix = function(mat)
+{
+	var retMat = {};
+	var determinant = mat.a * mat.d - mat.b * mat.c;
+
+	retMat.a = mat.d / determinant;
+	retMat.b = -mat.b / determinant;
+	retMat.c = -mat.c / determinant;
+	retMat.d = mat.a / determinant;
+	retMat.tx = -mat.tx;
+	retMat.ty = -mat.ty;
+
+	return retMat;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Returns positive or negative, depending on which side of the line the passed point is on.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+whichSide = function(_pt, _linePt, _lineVec)
+{
+	// Adapted from d=(x−x1)(y2−y1)−(y−y1)(x2−x1)
+	// http://math.stackexchange.com/questions/274712/calculate-on-which-side-of-a-straight-line-is-a-given-point-located
+	return (_pt.x - _linePt.x) * (_lineVec.y) - (_pt.y - _linePt.y) * (_lineVec.x);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Returns the vector projection of  _pt onto the line defined by _linePt and _lineVec
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+vectorProject = function(_pt, _linePt, _lineVec)
+{
+	var retPt = {};
+	
+	// Adapted from http://www.leadinglesson.com/vector-projections
+	// projecting point p onto vector v:
+	// projv(p) = (p⋅v) * v / |v|^2
+	//          = (p.x * v.x + p.y * v.y) * v / (v.x^2 + v.y^2)
+
+	// First let's move the point so that the line we're mapping onto originates at the origin
+	var adjustedPt =  {x: _pt.x - _linePt.x, y: _pt.y - _linePt.y};
+	
+	var magVSquared = _lineVec.x * _lineVec.x  + _lineVec.y * _lineVec.y;
+	var pDotV = (adjustedPt.x * _lineVec.x + adjustedPt.y * _lineVec.y);
+	
+	retPt.x = pDotV * _lineVec.x / magVSquared;
+	retPt.y = pDotV * _lineVec.y / magVSquared;
+	
+	// correct the adjustment we did earlier
+	retPt.x += _linePt.x;
+	retPt.y += _linePt.y;
+	
+	//debugTrace("Vector projected (" + _pt.x + ", " + _pt.y + ") to (" + retPt.x + ", " + retPt.y + ")");
+	
+	return retPt;
+}
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+matrix2String = function(mat)
+{
+	return "a = " + mat.a + ", b = " + mat.b + "\nc = " +  mat.c + ", d = " + mat.d + "\ntx = " + mat.tx + ", ty = " + mat.ty;
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Return the major version number of the Flash IDE
+///////////////////////////////////////////////////////////////////////////
+
+getFlashVersion = function()
+{
+
+	versionStr = fl.version;  // This is of the form "WIN 9,0,0,494"
+
+	//debugTrace("Flash version " + versionStr);
+	versionStr = versionStr.split(",")[0]; // get the substring before the first comma in the version info
+	versionStr = versionStr.split(" ")[1]; // get the version number (the substring after the space)
+
+	//debugTrace("Flash version " + versionStr);
+
+	return parseInt(versionStr);  // return the version as an integer
+};
+
+///////////////////////////////////////////////////////////////////////////
+// Returns true if both passed edges have the same control points
+///////////////////////////////////////////////////////////////////////////
+
+sameEdge = function(edge0, edge1)
+{
+	return (edge0.id == edge1.id);
+};
+
+///////////////////////////////////////////////////////////////////////////
+// Returns the intersection of two lines defined by the given start points
+// and the given vectors from those points. The parameter ray should be set 
+// to true if the caller only wants intersection of geometric rays, not lines
+///////////////////////////////////////////////////////////////////////////
+
+var INTERSECTION_PARALLEL = -1;
+var INTERSECTION_OUTSIDE = -2;
+
+getIntersectionPoint = function(pt1, vec1, pt2, vec2, ray)
+{
+	//debugTrace("entering call to getIntersectionPoint");
+	//debugTrace("pt1: " + pt1.x + ", " + pt1.y);
+	//debugTrace("vec1: " + vec1.x + ", " + vec1.y);
+	//debugTrace("pt2: " + pt2.x + ", " + pt2.y);
+	//debugTrace("vec2: " + vec2.x + ", " + vec2.y);
+	if(ray === undefined)
+		ray = true;
+
+	var a1, b1, c1, a2, b2, c2;
+	var retval = {};
+
+	a1 = vec1.y;
+	b1 = -vec1.x;
+	c1 = a1 * pt1.x + b1 * pt1.y;
+	a2 = vec2.y;
+	b2 = -vec2.x;
+	c2 = a2 * pt2.x + b2 * pt2.y;
+
+	//debugTrace("a1 = " + a1 + ", b1 = " + b1 + ", c1 = " + c1);
+	//debugTrace("a2 = " + a2 + ", b2 = " + b2 + ", c2 = " + c2);
+
+	var determinant = a1*b2 - a2*b1;
+	//bugTrace("getIntersectionPoint() determinant is " + determinant);
+	if(Math.abs(determinant) < PARALLEL_TANGENT_THRESHOLD)
+	{
+		//debugTrace("parallel lines");
+
+		return INTERSECTION_PARALLEL;
+	}
+	else
+	{
+		retval.x = (b2*c1 - b1*c2)/determinant;
+		retval.y = (a1*c2 - a2*c1)/determinant;
+		//debugTrace("intersection point: " + retval.x + ", " + retval.y);
+	}
+
+	if(ray)
+	{
+		// Now retval has the intersection point of the two lines
+		// Let's make sure it's in the direction of the vectors
+
+		/*
+		Retrieved from http://stackoverflow.com/questions/2931573/determining-if-two-rays-intersect
+		Given: two rays a, b with starting points (origin vectors) as, bs, and direction vectors ad, bd.
+
+		The two lines intersect if there is an intersection point p:
+
+		p = as + ad * u
+		p = bs + bd * v
+		
+		Solving the equations gives:
+
+		u = ((bs.y - as.y) * bd.x - (bs.x - as.x) * bd.y) / (bd.x * ad.y - bd.y * ad.x)
+		v = ((bs.y - as.y) * ad.x - (bs.x - as.x) * ad.y) / (bd.x * ad.y - bd.y * ad.x)
+		
+		Factoring out the common terms, this comes to:
+
+		dx = bs.x - as.x
+		dy = bs.y - as.y
+		det = bd.x * ad.y - bd.y * ad.x
+		u = (dy * bd.x - dx * bd.y) / det
+		v = (dy * ad.x - dx * ad.y) / det
+		Five subtractions, six multiplications and two divisions.
+
+		If you only need to know if the rays intersect, the signs of u and v are enough, and these two divisons can be replaced by num*denom<0 or (sign(num) != sign(denom)), depending on what is more efficient on your target machine.
+
+		Please note that the rare case of det==0 means that the rays do not intersect (one additional comparison).
+		*/
+		
+		var as = pt1;
+		var ad = {x:vec1.x, y:vec1.y};
+		var bs = pt2;
+		var bd = {x:vec2.x , y:vec2.y};
+
+		var dx = bs.x - as.x
+		var dy = bs.y - as.y
+		var det = bd.x * ad.y - bd.y * ad.x
+		var v = -1;
+		var u = -1;
+		
+		if(det !== 0) // Make sure we don't divide by zero
+		{
+			u = (dy * bd.x - dx * bd.y) / det;
+			v = (dy * ad.x - dx * ad.y) / det;
+		}
+		
+		
+		if(u < 0 || v < 0) // if the rays don't intersect
+		{
+			//debugTrace("Rays don't intersect");
+			return INTERSECTION_OUTSIDE;
+		}
+	}
+
+	//debugTrace("getIntersectionPoint()")
+	//debugTrace(pt1.x + ", " + pt1.y);
+	//debugTrace(retval.x + ", " + retval.y);
+	//debugTrace(pt2.x + ", " + pt2.y);
+
+	return retval;
+};
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+normalizeVector = function(_inVec)
+{
+	retVec = {};
+	var length = Math.sqrt(_inVec.x * _inVec.x + _inVec.y * _inVec.y);
+	retVec.x = _inVec.x / length;
+	retVec.y = _inVec.y / length;
+
+	return retVec;
+};
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+getDist = function(pt1, pt2)
+{
+	var dx = pt2.x - pt1.x;
+	var dy = pt2.y - pt1.y;
+	
+	return Math.sqrt(dx*dx + dy*dy);
+}
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+_v = function(_v)
+{
+	
+	return Math.sqrt(_v.x * _v.x + _v.y * _v.y);
+}
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+makeSelectionInvisible = function()
+{
+	var invisibleFill = doc.getCustomFill("toolbar");
+	var invisibleStroke = doc.getCustomStroke("toolbar");
+
+	invisibleFill.color = DUMMY_TRANSPARENCY;
+	invisibleFill.style = "solid";
+	invisibleStroke.style = "solid";
+	invisibleStroke.shapeFill = invisibleFill;
+
+	doc.setCustomFill(invisibleFill);
+	doc.setCustomStroke(invisibleStroke);
+};
+
+///////////////////////////////////////////////////////////////////////////
+// Returns an array of objects representing the edges in the contour, in 
+// order of traversal
+///////////////////////////////////////////////////////////////////////////
+
+getContourEdgeOrder = function(contour)
+{
+	var otherStartPoint;
+	var otherEndPoint;
+	var curStartPoint;
+	var curEndPoint;
+	var edges = [];
+
+	edges.length = 0;	
+	var he = contour.getHalfEdge();
+	var startEdge = curEdge = he.getEdge();
+	do
+	{
+		var thickness;
+		var fill;
+		thickness = 1;
+		fill = undefined;
+
+		if(curEdge.stroke !== undefined)
+		{
+			if(curEdge.stroke.thickness !== undefined)
+				thickness = curEdge.stroke.thickness;
+			if(curEdge.stroke.fill !== undefined)
+			{
+				//debugTrace("adding fill to edge");
+				fill = curEdge.stroke.fill;
+			}
+		}
+		//debugTrace("thickness of edge: " + thickness);
+		edges.push({pt0: curEdge.getControl(0), pt1: curEdge.getControl(1), pt2: curEdge.getControl(2), thickness: thickness, fill: fill});
+		//debugTrace("pushed edge " + edges.length + " with fill color " + fill.color.toString(16));
+
+		he = he.getNext();
+		curEdge = he.getEdge();
+	}
+	while(!sameEdge(curEdge, startEdge));
+
+	//debugTrace("There are " + edges.length + " edges in this contour");
+
+	var edgeOrd = [];
+
+	for(curIndex = 0; curIndex < edges.length; curIndex++)
+	{
+		// Zero out all the edge order entries
+		edgeOrd[curIndex] = {prev:undefined, next:undefined};
+	}
+
+	curIndex = 0;
+	do
+	{
+		curStartPoint = edges[curIndex].pt0;
+		curEndPoint   = edges[curIndex].pt2;
+
+		for(otherIndex = 0; otherIndex < edges.length; otherIndex++)
+		{
+			if(curIndex != otherIndex)
+			{
+				// If we've already found next and prev for this edge, don't look any more
+				if(edgeOrd[curIndex].next !== undefined && edgeOrd[curIndex].prev !== undefined)
+					break;
+
+				otherStartPoint = edges[otherIndex].pt0;
+				otherEndPoint   = edges[otherIndex].pt2;
+
+				if(edgeOrd[curIndex].next === undefined)
+				{
+					if(curEndPoint.x == otherStartPoint.x && curEndPoint.y == otherStartPoint.y)
+					{
+						edgeOrd[curIndex].next = otherIndex;
+						edgeOrd[otherIndex].prev = curIndex;
+						//debugTrace("1: edge " + curIndex + " goes to " + otherIndex);
+						break;
+					}
+					else if(curEndPoint.x == otherEndPoint.x && curEndPoint.y == otherEndPoint.y)
+					{
+						// This end point meets the other end point.
+						// Switch around the start and end points of the other edge so 
+						// we have consistent orientation
+						var tempPt = edges[otherIndex].pt0;
+						edges[otherIndex].pt0 = edges[otherIndex].pt2;
+						edges[otherIndex].pt2 = tempPt;
+
+						edgeOrd[curIndex].next = otherIndex;
+						edgeOrd[otherIndex].prev = curIndex;
+						//debugTrace("2: edge " + curIndex + " goes to " + otherIndex);
+						break;
+					}
+				}
+			}
+		}
+		// Now edgeOrd[curIndex].next should be set.  Make that one the next edge to work on
+		curIndex = edgeOrd[curIndex].next;
+	}
+	while(curIndex !== 0);
+
+	// We only care about the edge starting at index 0, because that's the one
+	// that we know is in the contour
+	var startIndex = 0;
+	// An array of edge indices
+	var retArray = [];	
+
+	curIndex = startIndex;
+	do
+	{
+		retArray.push(edges[curIndex]);
+		curIndex = edgeOrd[curIndex].next;
+	}
+	while(curIndex !== undefined && curIndex != startIndex);
+
+	if(curIndex === undefined)
+		 fl.trace("ERROR!!! unclosed path on a contour!");
+
+	return retArray;
+};
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+getBrushShape = function(item)
+{
+	var theShape = item.timeline.layers[0].frames[0].elements[0];
+	//debugTrace("getBrushShape. Shape translation = " + theShape.matrix.tx + ", " + theShape.matrix.ty);
+	//debugTrace("x = " + theShape.x + ", y = " + theShape.x);
+	//debugTrace("xscale = " + theShape.scaleX + ", yscale = " + theShape.scaleY);
+
+	if(item.timeline.layers[0].frames[0].elements.length > 1)
+	{
+		alert(INCOMPATIBLE_BRUSH_WARNING_1 + item.name + INCOMPATIBLE_BRUSH_WARNING_2);
+	}
+
+	if(theShape && theShape.elementType == "shape")
+	{
+		//debugTrace("brush shape coords:             (" + theShape.x + ", " + theShape.y + ")");
+		//debugTrace("brush shape matrix translation: (" + theShape.matrix.tx + ", " + theShape.matrix.ty + ")");
+		//debugTrace("brush shape is floating?        " + theShape.isFloating);
+
+		if(!isIdentityMatrix(theShape.matrix))
+			fl.trace(SHAPE_WITH_MATRIX_WARNING_1 + item.name + SHAPE_WITH_MATRIX_WARNING_2);
+
+		return theShape;
+	}
+	else return null;
+}
+
+///////////////////////////////////////////////////////////////////////////
+// getBrushBounds
+//
+// Gets the element that defines the bounds of the brush -- the part of 
+// the brush that corresponds to the stroke it's applied to. Any art
+// beyond the bounds element will be applied straight out from the ends
+// of the applied brush
+///////////////////////////////////////////////////////////////////////////
+
+getBrushBounds = function(item)
+{
+	var boundsElement;
+	var boundsLayer = -1;
+	var currentLayer;
+
+	// Look for the layer with the proper label (LAYER_NAME_STROKE_EXTENT)
+	for(currentLayer = 0; currentLayer < item.timeline.layerCount; currentLayer++)
+		if(item.timeline.layers[currentLayer].name == LAYER_NAME_STROKE_EXTENT && item.timeline.layers[currentLayer].frames[0].elements.length)
+		{
+			// Found the official bounds layer.
+			boundsLayer = currentLayer;
+			//debugTrace("Found the bounds layer with the expected name (" + LAYER_NAME_STROKE_EXTENT + ")");
+			break;
+		}
+
+	// If that didn't work, Start at the last layer. If there isn't an element there, go 
+	// back to the first layer and go down from there. That way we'll only pay attention 
+	// to either the bottom element on the bottom layer or the topmost element in the 
+	// whole symbol
+
+	//debugTrace("getBrushBounds boundsLayer = " + boundsLayer);
+
+	// If we didn't find a properly named bounds layer
+	if(boundsLayer == -1)
+	{
+		// if there's an element on the last layer
+		if(item.timeline.layers[item.timeline.layerCount - 1].frames[0].elements[0])
+		{
+			// Let's use this layer for the bounds even though it's not named properly
+			boundsLayer = item.timeline.layerCount - 1;
+			//debugTrace("Using the last layer as the bounds layer");
+		}
+		else // there wasn't anything on the last layer
+		{
+			boundsElement = null;
+
+			// go through the layers from top to bottom until we find one with something on it
+			for(boundsLayer = 0; boundsLayer < item.timeline.layerCount; boundsLayer++)
+			{
+				for(var elNum = item.timeline.layers[boundsLayer].frames[0].elements.length - 1; elNum >= 0; elNum--)
+				{
+					//debugTrace("looking on layer " + boundsLayer + " for bounds element");
+					if(item.timeline.layers[boundsLayer].frames[0].elements[elNum])
+					{
+						//debugTrace("found bounds element on layer " + boundsLayer);
+						boundsElement = item.timeline.layers[boundsLayer].frames[0].elements[elNum];
+						//debugTrace("Found the bounds layer with an unexpected name (" + item.timeline.layers[boundsLayer].name + ")");
+						break;
+					}
+				}
+				if(boundsElement)
+					break;
+			}
+		}
+	}
+
+	//debugTrace("Using bounds element found on layer " + boundsLayer)
+	boundsElement = item.timeline.layers[boundsLayer].frames[0].elements[0];
+
+	//debugTrace("getBrushBounds. Bounds layer is #" + boundsLayer + ". Shape translation = ");
+	//debugTrace("x = " + boundsElement.x + ", y = " + boundsElement.x);
+	//debugTrace("xscale = " + boundsElement.scaleX + ", yscale = " + boundsElement.scaleY);
+
+	if(boundsElement)
+	{
+		//debugTrace("------------- bounds element ---------------")
+		//debugTrace("bounds element     Y = " + ((boundsElement.height) / 2.0 + boundsElement.top));
+		//debugTrace("bounds element  left = " + boundsElement.left);
+		//debugTrace("bounds element right = " + (boundsElement.left + boundsElement.width));
+
+		boundsElement.selected = false;		
+	}
+
+	return boundsElement;
+};
+
+///////////////////////////////////////////////////////////////////////////
+// getBrushExpansionBounds
+//
+// Gets the element that defines the bounds of what should be stretched
+// when applying the brush. If there are only one or two layers it takes 
+// the first element on the first layer. If there are more layers it uses
+// the second to lowest layer
+///////////////////////////////////////////////////////////////////////////
+
+getBrushExpansionBounds = function(item)
+{
+	var expansionBoundsLayer;
+	var expansionBoundsElement;
+
+	if(item.timeline.layerCount > 2)
+	{
+		expansionBoundsLayer = item.timeline.layerCount - 2;
+
+		// there are at least three layers so use what's on the second-to-last as the bounds.
+		expansionBoundsElement = item.timeline.layers[expansionBoundsLayer].frames[0].elements[0];
+		if(expansionBoundsElement)
+			expansionBoundsElement.selected = false;
+	}
+	else expansionBoundsElement = undefined;
+
+	//debugTrace("getBrushExpansionBounds. Expansion Bounds layer is #" + expansionBoundsLayer + ". Shape translation = ");
+	//debugTrace("x = " + expansionBoundsElement.x + ", y = " + expansionBoundsElement.x);
+	//debugTrace("xscale = " + expansionBoundsElement.scaleX + ", yscale = " + expansionBoundsElement.scaleY);
+
+	return expansionBoundsElement;
+};
+
+///////////////////////////////////////////////////////////////////////////
+//=========================================================================
+// Gauss-Legendre numerical integration
+//
+// Adapted from:
+// http://code.google.com/p/degrafa/source/browse/branches/Origin/Degrafa/com/degrafa/utilities/math/Gauss.as?r=459&spec=svn459
+//=========================================================================
+///////////////////////////////////////////////////////////////////////////
+
+
+function Gauss()
+{
+	this.MAX_POINTS     = 8;
+
+	this.abscissa = [];
+	this.weight   = [];
+
+	// N=2
+	this.abscissa.push(-0.5773502692);
+	this.abscissa.push( 0.5773502692);
+
+	this.weight.push(1);
+	this.weight.push(1);
+
+	// N=3
+	this.abscissa.push(-0.7745966692);
+	this.abscissa.push( 0.7745966692);
+	this.abscissa.push(0);
+
+	this.weight.push(0.5555555556);
+	this.weight.push(0.5555555556);
+	this.weight.push(0.8888888888);
+
+	// N=4
+	this.abscissa.push(-0.8611363116);
+	this.abscissa.push( 0.8611363116);
+	this.abscissa.push(-0.3399810436);
+	this.abscissa.push( 0.3399810436);
+
+	this.weight.push(0.3478548451);
+	this.weight.push(0.3478548451);
+	this.weight.push(0.6521451549);
+	this.weight.push(0.6521451549);
+
+	// N=5
+	this.abscissa.push(-0.9061798459);
+	this.abscissa.push( 0.9061798459);
+	this.abscissa.push(-0.5384693101);
+	this.abscissa.push( 0.5384693101);
+	this.abscissa.push( 0.0000000000);
+
+	this.weight.push(0.2369268851);
+	this.weight.push(0.2369268851);
+	this.weight.push(0.4786286705);
+	this.weight.push(0.4786286705);
+	this.weight.push(0.5688888888);
+
+	// N=6
+	this.abscissa.push(-0.9324695142);
+	this.abscissa.push( 0.9324695142);
+	this.abscissa.push(-0.6612093865);
+	this.abscissa.push( 0.6612093865);
+	this.abscissa.push(-0.2386191861);
+	this.abscissa.push( 0.2386191861);
+
+	this.weight.push(0.1713244924);
+	this.weight.push(0.1713244924);
+	this.weight.push(0.3607615730);
+	this.weight.push(0.3607615730);
+	this.weight.push(0.4679139346);
+	this.weight.push(0.4679139346);
+
+	// N=7
+	this.abscissa.push(-0.9491079123);
+	this.abscissa.push( 0.9491079123);
+	this.abscissa.push(-0.7415311856);
+	this.abscissa.push( 0.7415311856);
+	this.abscissa.push(-0.4058451514);
+	this.abscissa.push( 0.4058451514);
+	this.abscissa.push( 0.0000000000);
+
+	this.weight.push(0.1294849662);
+	this.weight.push(0.1294849662);
+	this.weight.push(0.2797053915);
+	this.weight.push(0.2797053915);
+	this.weight.push(0.3818300505);
+	this.weight.push(0.3818300505);
+	this.weight.push(0.4179591837);
+
+	// N=8
+	this.abscissa.push(-0.9602898565);
+	this.abscissa.push( 0.9602898565);
+	this.abscissa.push(-0.7966664774);
+	this.abscissa.push( 0.7966664774);
+	this.abscissa.push(-0.5255324099);
+	this.abscissa.push( 0.5255324099);
+	this.abscissa.push(-0.1834346425);
+	this.abscissa.push( 0.1834346425);
+
+	this.weight.push(0.1012285363);
+	this.weight.push(0.1012285363);
+	this.weight.push(0.2223810345);
+	this.weight.push(0.2223810345);
+	this.weight.push(0.3137066459);
+	this.weight.push(0.3137066459);
+	this.weight.push(0.3626837834);
+	this.weight.push(0.3626837834);
+}
+
+/**
+* @param _f:Function - Reference to function to be integrated - must accept a numerical argument and return
+*                      the function value at that argument.
+*
+* @param _a:Number   - Left-hand value of interval.
+* @param _b:Number   - Right-hand value of inteval.
+* @param _n:Number   - Number of points -- must be between 2 and 8
+*
+* @return Number - approximate integral value over [_a, _b] or 0 if an error condition occured.  Assign a handler for the
+* 'invalid_parameters' event.  The three possible error conditions are 1) non-numeric values for the interval,  2) an invalid
+* interval, 3) an invalid function reference, and 4) an invalid number of samples (must be between two and 8
+*
+* @since 1.0
+*
+*/
+
+Gauss.prototype.eval = function(_f, _a, _b, _n)
+{
+	var i;
+	//debugTrace("Gauss.prototype.eval");
+
+	// evaluate the integral over the specified interval
+	if( isNaN(_a) || isNaN(_b) )
+	{
+		//debugTrace("_a or _b is NaN");
+		return 0;
+	}
+
+	if(_a == _b)
+	{
+		return 0;
+	}
+
+	if( _a > _b )
+	{
+		//debugTrace("_a > _b");
+		return 0;
+	}
+
+	if( !(typeof _f == "function") )
+	{
+		//debugTrace("_f isn't a function");
+		return 0;
+	}
+
+	if( isNaN(_n) || _n < 2 )
+	{
+		//debugTrace("_n is NaN or is < 2");
+		return 0;
+	}
+
+	var n = Math.max(_n,2);
+	n     = Math.min(n,this.MAX_POINTS);
+
+	var l   = (n==2) ? 0 : n*(n-1)/2 - 1;
+	var sum = 0;
+
+	if( _a == -1 && _b == 1 )
+	{
+		for(i=0; i<n; ++i )
+			sum += _f(this.abscissa[l+i])*this.weight[l+i];
+
+		//debugTrace("returning " + sum);
+		return sum;
+	}
+	else
+	{
+		// change of variable
+		var mult = 0.5*(_b-_a);
+		var ab2  = 0.5*(_a+_b);
+		for( i=0; i<n; ++i )
+		{
+			//debugTrace("_f(" + ab2 + " + " + mult + "*" + this.abscissa[l+i] + ")*" + this.weight[l+1]);
+			sum += _f(ab2 + mult*this.abscissa[l+i])*this.weight[l+i];
+		}
+
+		//debugTrace("2returning " + sum + " * " + mult);
+		return mult*sum;
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////
+//=========================================================================
+// Bezier class
+// 
+//
+// Adapted the length estimation functions for quadratic beziers from:
+// http://www.algorithmist.net/bezierarclength/srcview/index.html
+//
+// See the working demo here: 
+// http://www.algorithmist.net/bezierarclength/DegrafaTemplate.html
+//=========================================================================
+///////////////////////////////////////////////////////////////////////////
+
+function Bezier(_ptA, _ptB, _ptC, _fill)
+{
+	this.LINEAR_SAMPLE_TABLE_SIZE = 20;
+
+	this.integrate = new Gauss();
+	this.setControls(_ptA, _ptB, _ptC);
+	this.fill = _fill;
+
+	//if(_fill)
+	//	//debugTrace("edge color " + _fill.color.toString(16));
+
+	var me = this;
+
+	//-------------------------------------------------------------------------
+
+	// integrand for Gauss-Legendre numerical integration
+	// This is defined in the constructor so it can remember the me var as a callback
+	this.integrand = function(_t)
+	{
+		//debugTrace("c1X = " + me.c1X + ", c1Y = " + me.c1Y + ", c2X = " + me.c2X + ", c2Y = " + me.c2Y);
+		//debugTrace("pointA = " + me.pointA.x + ", " + me.pointA.y + ", pointB = " + me.pointB.x + ", " + me.pointB.y + ", pointC = " + me.pointC.x + ", " + me.pointC.y);
+		// first-derivative of the quad. bezier
+		var xPrime = me.c1X + 2.0*me.c2X*_t;
+		var yPrime = me.c1Y + 2.0*me.c2Y*_t;
+
+		//debugTrace("integrand returns " + Math.sqrt(xPrime*xPrime + yPrime*yPrime));
+		return Math.sqrt( xPrime*xPrime + yPrime*yPrime );
+	}
+}
+
+//-------------------------------------------------------------------------
+
+Bezier.prototype.setControls = function(_ptA, _ptB, _ptC)
+{
+	this.pointA = {x:_ptA.x, y:_ptA.y};
+	this.pointB = {x:_ptB.x, y:_ptB.y};
+	this.pointC = {x:_ptC.x, y:_ptC.y};
+	this.computeBezierCoef();
+	this.paramTableReady = false;
+}
+
+//-------------------------------------------------------------------------
+// compute the quad. bezier coefficients
+
+Bezier.prototype.computeBezierCoef = function()
+{
+	//debugTrace("Setting coefficients from: " + this.pointA.x + ", " + this.pointA.y);
+	//debugTrace("                           " + this.pointB.x + ", " + this.pointB.y);
+	//debugTrace("                           " + this.pointC.x + ", " + this.pointC.y);
+
+	// Constant
+	this.c0X = this.pointA.x;
+	this.c0Y = this.pointA.y;
+
+	// Linear
+	this.c1X = 2.0*(this.pointB.x-this.pointA.x);
+	this.c1Y = 2.0*(this.pointB.y-this.pointA.y);
+
+	// Square
+	this.c2X = this.pointA.x-2.0*this.pointB.x+this.pointC.x;
+	this.c2Y = this.pointA.y-2.0*this.pointB.y+this.pointC.y;
+
+	var xBelowThresh = (this.c2X > -LINEAR_THRESHOLD && this.c2X < LINEAR_THRESHOLD);
+	var yBelowThresh = (this.c2Y > -LINEAR_THRESHOLD && this.c2Y < LINEAR_THRESHOLD);
+
+	if(xBelowThresh && yBelowThresh)
+	{
+		//debugTrace("============================== SMALLER THAN LINEAR THRESHOLD!");
+		//debugTrace("this.c2X = " + this.c2X);
+		//debugTrace("this.pointA: " + this.pointA.x + ", " + this.pointA.y);
+		//debugTrace("this.pointB: " + this.pointB.x + ", " + this.pointB.y);
+		//debugTrace("this.pointC: " + this.pointC.x + ", " + this.pointC.y);
+		this.c2X = 0;
+		this.c2Y = 0;
+	}
+}
+
+//-------------------------------------------------------------------------
+
+Bezier.prototype.getPointNatural = function(_t)
+{
+	//debugTrace("x = " + this.c0X + " + " + this.c1X + " * " + _t + " + " + this.c2X + " * " + _t + "^2");
+	//debugTrace("y = " + this.c0Y + " + " + this.c1Y + " * " + _t + " + " + this.c2Y + " * " + _t + "^2");
+	//debugTrace("pointA = " + this.pointA.x + ", " + this.pointA.y + ", pointB = " + this.pointB.x + ", " + this.pointB.y + ", pointC = " + this.pointC.x + ", " + this.pointC.y);
+	//debugTrace("t = " + _t);
+	var retPt = {x:this.c0X + this.c1X*_t + this.c2X*_t*_t, y:this.c0Y + this.c1Y*_t + this.c2Y*_t*_t} 
+	//debugTrace("Bezier.prototype.getPointNatural(" + _t + ") returns " + retPt.x + ", " + retPt.y);
+	return retPt;
+}
+
+//-------------------------------------------------------------------------
+
+Bezier.prototype.getPointFromLength = function(_len)
+{
+	var len;
+
+	// Let's make sure we're not working with numbers that are too small. If the 
+	// passed length is very close to 0 or the length of the bezier, clamp it to
+	// 0 or the length of the bezier
+	//if(_len < VERTEX_ADDITION_PRECISION_THRESHOLD)
+	//	len = 0;
+	//else if(_len > this.length - VERTEX_ADDITION_PRECISION_THRESHOLD)
+	//	len = this.length;
+	//else
+		len = _len;
+
+	var t = this.getParamFromLength(len);
+	//debugTrace("Bezier.prototype.getPointFromLength(" + len + "): t = " + t);
+	var retPt = this.getPointNatural(t);
+	//debugTrace("Bezier.prototype.getPointFromLength(" + len + ") returns " + retPt.x + ", " + retPt.y);
+	return retPt;
+}
+
+//-------------------------------------------------------------------------
+
+Bezier.prototype.getTangentVector = function(_t)
+{
+	var tanVec = {};
+
+	tanVec.x = this.pointB.x - this.pointA.x + this.c2X * _t;
+	tanVec.y = this.pointB.y - this.pointA.y + this.c2Y * _t;
+
+	/*
+	if(_t > 1 || _t < 0)
+	{
+		//debugTrace("param = " + _t);
+		//debugTrace("pointA = " + this.pointA.x + ", " + this.pointA.y + ", pointB = " + this.pointB.x + ", " + this.pointB.y + ", pointC = " + this.pointC.x + ", " + this.pointC.y);
+		//debugTrace("tanVec = " + tanVec.x + ", " + tanVec.y);
+	}
+	*/
+	return tanVec;
+}
+
+//-------------------------------------------------------------------------
+
+Bezier.prototype.getTangentVectorByLength = function(_len)
+{
+	var t = this.getParamFromLength(_len);
+	return this.getTangentVector(t);
+}
+
+//-------------------------------------------------------------------------
+
+Bezier.prototype.getTangent = function(_t)
+{
+	return getAngle(this.getTangentVector(_t));
+}
+
+//-------------------------------------------------------------------------
+
+Bezier.prototype.initLinearParamTable = function()
+{
+	this.linearParamTable = [];
+	var n;
+	this.linearParamTable[0] = 0;
+	for(n = 1; n < this.LINEAR_SAMPLE_TABLE_SIZE; n++)
+	{
+		this.linearParamTable.push(this.getLengthPrecise(0, n / (this.LINEAR_SAMPLE_TABLE_SIZE - 1)));
+		//debugTrace("" + (n / (this.LINEAR_SAMPLE_TABLE_SIZE - 1)) + " maps to " + this.linearParamTable[this.linearParamTable.length - 1]);
+	}
+
+	this.length = this.linearParamTable[this.LINEAR_SAMPLE_TABLE_SIZE - 1];
+
+	this.paramTableReady = true;
+}
+
+//-------------------------------------------------------------------------
+// This function expects non-normalized length as the parameter
+
+Bezier.prototype.getParamFromLength = function(_len)
+{	
+	this.length = this.getLength();
+
+	//debugTrace("getParamFromLength: looking for length " + _len + " in bez of length " + this.length);
+
+	/*
+	if(_len <= 0)
+		return 0;
+	if(_len >= this.length)
+		return 1;
+	*/
+
+	//debugTrace("Bezier length is " + this.length);
+
+	// Make sure the parameter table has been built
+	if(!this.paramTableReady)
+	{
+		//debugTrace("initializing param table");
+		this.initLinearParamTable();
+	}
+
+	//debugTrace("Bezier length is " + this.length);
+
+	// Do a binary search to find the two table entries that surround the requested length
+	var top = this.linearParamTable.length - 1;
+	var bottom = 0;
+	//debugTrace("zeroing in on a likely suspect for target length " + _len);
+	while(this.linearParamTable[bottom + 1] < _len && this.linearParamTable[bottom + 1] != this.length)
+	{
+		var middle = ((bottom + top) / 2) | 0;
+		//debugTrace("" + _len + ": top = " + this.linearParamTable[top] + ", middle = " + this.linearParamTable[middle] + ", bottom = " + this.linearParamTable[bottom]);
+		if(this.linearParamTable[middle] <= _len)
+			bottom = middle;
+		else top = middle;
+		//for(z = 0; z < 1000000; z++);  // slow-downer
+	}
+
+	// Now we have upper and lower limits.  Do a linear interpolation 
+	// between those to get the return value
+
+	// These vars are just for readability
+	aLen = this.linearParamTable[bottom];
+	bLen = this.linearParamTable[bottom + 1];
+
+	// Find the natural parameter via linear interpolation between the table entries
+	var retval = (bottom + (_len - aLen) / (bLen - aLen)) / (this.linearParamTable.length - 1);
+
+	//debugTrace("found t = " + retval + " for " + _len + " out of " + this.length);
+
+	return retval;
+}
+
+//-------------------------------------------------------------------------
+// Finds the distance along the bezier between two parameters
+
+Bezier.prototype.getSegmentLengthNatural = function(_t1, _t2)
+{	
+	var t = [_t1, _t2];
+	
+	// Make sure the parameter table has been built
+	if(!this.paramTableReady)
+	{
+		//debugTrace("initializing param table");
+		this.initLinearParamTable();
+	}
+	this.length = this.getLength();
+
+	var len = [];
+	var tableLen1, tableLen2;
+	var paramTableEntry;
+	var tableEntryParam;
+	var tableEntrySize;
+	var tableEntryParamSize = 1 / (this.linearParamTable.length - 1); // the param distance between table entries
+	var n;
+	
+	//debugTrace("Finding distance between parameters " + _t1 + " and " + _t2);
+	//debugTrace("param table length: " + this.linearParamTable.length);
+	// Find the lengths to the two parameters
+	for(n = 0; n < 2; n++)
+	{
+		if(t[n] === 0)
+			len[n] = 0;
+		else if(t[n] == 1)
+			len[n] = this.length;
+		else
+		{
+			paramTableEntry = ((this.linearParamTable.length - 1) * t[n]) | 0;
+			tableEntryParam = paramTableEntry / (this.linearParamTable.length - 1); // the parameter of the table entry (0..1)
+			tableLen1 = this.linearParamTable[paramTableEntry];
+			tableLen2 = this.linearParamTable[paramTableEntry + 1];
+			tableEntrySize = tableLen2 - tableLen1;
+			
+			//debugTrace("param table entry: " + paramTableEntry);
+			//debugTrace("param table entry parameter: " + tableEntryParam);
+			//debugTrace("param table entry length 1: " + tableLen1);
+			//debugTrace("param table entry length 2: " + tableLen2);
+			//debugTrace("param table entry size: " + tableEntrySize);
+			
+			len[n] = tableLen1 + (t[n] - tableEntryParam) / tableEntryParamSize * tableEntrySize;
+				
+		}
+		
+		//debugTrace("Length to parameter " + t[n] + ": " + len[n]);		
+	}
+	// return the differece between the two lengths
+	var retVal = len[1] - len[0];
+	return retVal;
+}
+
+//-------------------------------------------------------------------------
+// approximate arc-length by linear interpolation from a pre-calculated table
+
+Bezier.prototype.getLength = function()
+{	
+	if(this.paramTableReady)
+	{
+		//debugTrace("length was already calculated");
+		return this.length;
+	}
+	else
+	{
+		//debugTrace("calculating length anew");
+		return this.getLengthPrecise(0,1);
+	}
+}
+
+
+//-------------------------------------------------------------------------
+// approximate arc-length by numerical integration
+
+Bezier.prototype.getLengthPrecise = function(_t1, _t2)
+{	
+	// arc length along curve from t1 to t2
+	return this.integrate.eval(this.integrand, _t1, _t2, 5);
+}
+
+//-------------------------------------------------------------------------
+// Returns an array of the t values where the x coord == _x
+// Returns an empty array if there are no intersections in 0<=t<=1
+
+Bezier.prototype.getXIntercepts = function(_x)
+{	
+	// I'm gonna use the quadratic equation.
+
+	var t0, t1;
+	var a = this.c2X, b = this.c1X, c = this.c0X - _x;
+
+	//debugTrace("testing edge for intersection with " + _x);
+	//debugTrace("a = " + a + ", b = " + b + ", c = " + c);
+	//debugTrace("this.pointA: " + this.pointA.x + ", " + this.pointA.y);
+	//debugTrace("this.pointB: " + this.pointB.x + ", " + this.pointB.y);
+	//debugTrace("this.pointC: " + this.pointC.x + ", " + this.pointC.y);
+	if(a !== 0)
+	{
+		var discriminant = b*b - 4*a*c;
+		//debugTrace("discriminant is " + discriminant);
+
+		// If the discriminant is >= 0 then there is at least one intersection, though maybe not in 0<=t<=1
+		if(discriminant >= 0)
+		{
+			var retArray = [];
+			t0 = (-b + Math.sqrt(discriminant)) / (2 * a);
+			t1 = (-b - Math.sqrt(discriminant)) / (2 * a);
+
+			if(t0 < t1)
+			{
+				//debugTrace("t0 < t1: t0 = " + t0 + ", t1 = " + t1);
+				if(t0 > 0 && t0 < 1)
+					retArray.push(t0);
+				if(t1 > 0 && t1 < 1)
+					retArray.push(t1);
+			}
+			else if(t0 > t1)
+			{
+				//debugTrace("t0 > t1: t0 = " + t0 + ", t1 = " + t1);
+				if(t1 > 0 && t1 < 1)
+					retArray.push(t1);
+				if(t0 > 0 && t0 < 1)
+					retArray.push(t0);
+			}
+			else if(t0 >= 0 && t0 <= 1)
+			{
+				//debugTrace("pushing t0");
+				retArray.push(t0);
+			}
+
+			//debugTrace("retArray has " + retArray.length + " elements");
+			return retArray;
+		}
+		else
+			return [];
+	}
+	else if(this.pointA.x != this.pointC.x)
+	{
+		var t = (_x - this.pointA.x) / (this.pointC.x - this.pointA.x);
+		//debugTrace("linear, t = " + t);
+		if(t > 0 && t < 1)
+		{
+			//debugTrace("returning an intersection with a straight line");
+			return [t];
+		}
+		else return [];
+	}
+	else
+		return [];
+}
+
+//-------------------------------------------------------------------------
+// Returns an array of the t values where the line defined by lp1 and lp2
+// intersects this bezier
+// It works by transforming a copy of this bezier to have the given line
+// be the Y axis, then calling getXIntercepts()
+
+Bezier.prototype.getLineIntercepts = function(lp1, lp2)
+{	
+	var tempCoords = {c0X: this.c0X, c0Y: this.c0Y, c1X: this.c1X, c1Y: this.c1Y, c2X: this.c2X, c2Y: this.c2Y};
+	
+	// Move this bezier so point 0 is at the origin
+	var pt0 = {x: 0, y: 0};
+	var pt1 = {x: this.c1X - this.c0X, y: this.c1Y - this.c0Y};
+	var pt2 = {x: this.c2X - this.c0X, y: this.c2Y - this.c0Y};
+	
+	var rotAngle = Math.PI / 2 - Math.atan2(this.c1X, this.c1Y);
+	
+	var alignMatrix = {};
+	alignMatrix.a = alignMatrix.d = Math.cos(rotAngle);
+	alignMatrix.b = -Math.sin(rotAngle);
+	alignMatrix.c = Math.sin(rotAngle);
+	alignMatrix.tx = 0;
+	alignMatrix.ty = 0;
+	
+	pt0 = apply_transform(alignMatrix, pt0);
+	pt1 = apply_transform(alignMatrix, pt1);
+	pt2 = apply_transform(alignMatrix, pt2);
+	
+	var alignedBez = new Bezier(pt0, pt1, pt2, this.fill);
+	return alignedBez.getXIntercepts(0);
+}
+
+//-------------------------------------------------------------------------
+// Returns a vector representing the first derivative at the given parameter
+
+Bezier.prototype.getDerivativeFirst = function(_t)
+{
+	var retVal = {};
+	retVal.x = 2 * (1 - _t) * (this.pointB.x - this.pointA.x) + 2 * _t * (this.pointC.x - this.pointB.x);
+	retVal.y = 2 * (1 - _t) * (this.pointB.y - this.pointA.y) + 2 * _t * (this.pointC.y - this.pointB.y);
+	return retVal;
+}
+
+//-------------------------------------------------------------------------
+// Returns a vector representing the second derivative at the given parameter
+
+Bezier.prototype.getDerivativeSecond = function(_t)
+{
+	var retVal = {};
+	retVal.x = 2 * (this.pointC.x - 2 * this.pointB.x + this.pointA.x);
+	retVal.y = 2 * (this.pointC.y - 2 * this.pointB.y + this.pointA.y);
+	return retVal;
+}
+
+//-------------------------------------------------------------------------
+// Returns the curvature at the given parameter
+// Adapted from http://blog.avangardo.com/2010/10/c-implementation-of-bezier-curvature-calculation/
+
+Bezier.prototype.GetRadiusOfCurvature = function(_t)
+{
+	var d1 = this.getDerivativeFirst(_t);
+	var d2 = this.getDerivativeSecond(_t);
+	
+	//debugTrace("Derivative (1st) at t = " + _t + ": " + d1.x + ", " + d1.y);
+	//debugTrace("Derivative (2nd) at t = " + _t + ": " + d2.x + ", " + d2.y);
+
+	//var r1 = Math.pow(d1.x * d1.x + d1.y * d1.y, 3 / 2); // this will be positive
+	//var r2 = d1.x * d2.y - d2.x * d1.y;                  // Could end up 0, so we should watch out for divide-by-zero
+	
+	// curvature(t) = |B'(t) x B''(t)|/||B'(t)||^3
+	// radius of curvature = 1 / curvature
+	var r1 = Math.pow(Math.sqrt(d1.x * d1.x + d1.y * d1.y), 3);
+	var r2 = d1.x * d2.y - d2.x * d1.y;
+	
+	//debugTrace("r1 = " + r1);
+	//debugTrace("r2 = " + r2);
+	
+	if(r1 === 0)
+		return 0;
+	
+	if(r2 === 0) // avoid divide-by-zero
+	{
+		if(r1 >= 0)
+			return Infinity;
+		else
+			return -Infinity;
+	}
+	else return r1 / r2;
+}
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+// CompoundBezier
+//
+// A path made up of multiple bezier objects
+///////////////////////////////////////////////////////////////////////////
+
+function CompoundBezier(_pathEdges, _forward) // pass _forward as false to reverse the path
+{
+	var n;
+
+	if(_forward)
+		this.edges = _pathEdges;
+	else // we'll be using the reverse order of the provided edges
+	{
+		// Reverse the order of the edges
+		this.edges = _pathEdges.slice(0).reverse();
+		for(n = 0; n < this.edges.length; n++)
+		{
+			// Reverse the order of the points in each edge
+			this.edges[n] = {pt0: this.edges[n].pt2, pt1: this.edges[n].pt1, pt2: this.edges[n].pt0, thickness: this.edges[n].thickness, fill: this.edges[n].fill};
+		}
+	}
+
+	this.startLength = [];
+	this.vertexIsCorner = [false];
+	this.beziers = [];
+	this.cornerBisect = [];
+	this.length = 0;
+
+	for(n = 0; n < this.edges.length; n++)
+	{
+		this.beziers[n] = new Bezier(this.edges[n].pt0, this.edges[n].pt1, this.edges[n].pt2, this.edges[n].fill);
+		//debugTrace("Edge points: " + this.edges[n].pt0.x + ", " + this.edges[n].pt0.y);
+		//debugTrace("             " + this.edges[n].pt1.x + ", " + this.edges[n].pt1.y);
+		//debugTrace("             " + this.edges[n].pt2.x + ", " + this.edges[n].pt2.y);
+		//debugTrace("Bezier points: " + this.beziers[n].pointA.x + ", " + this.beziers[n].pointA.y);
+		//debugTrace("               " + this.beziers[n].pointB.x + ", " + this.beziers[n].pointB.y);
+		//debugTrace("               " + this.beziers[n].pointC.x + ", " + this.beziers[n].pointC.y);
+		this.startLength[n] = this.length;
+		this.length += this.beziers[n].getLength();
+		//debugTrace("thickness: " + this.edges[n].thickness);
+		//debugTrace("Bezier " + n + " has length " + this.beziers[n].getLength());
+		if(n > 0)
+		{
+			// angle of the tangent of the first point of this bezier
+			var tanRight = Math.atan2(this.beziers[n].pointB.x - this.beziers[n].pointA.x, this.beziers[n].pointB.y - this.beziers[n].pointA.y);
+			// angle of the negative tangent of the last point of the previous bezier
+			var tanLeft = Math.atan2(this.beziers[n-1].pointC.x - this.beziers[n-1].pointB.x, this.beziers[n-1].pointC.y - this.beziers[n-1].pointB.y);
+
+			debugTrace("Checking for corner. tanRight = " + tanRight);
+			debugTrace("                      tanLeft = " + tanLeft);
+			debugTrace("Corner angle difference = " + Math.abs(tanRight - tanLeft))
+			this.vertexIsCorner[n] = (Math.abs(tanRight - tanLeft) > CORNER_ANGLE_TOLERANCE);
+			if(this.vertexIsCorner[n])
+			{
+				debugTrace("found a corner at vertex " + n);
+				debugTrace("Tangent difference: " + Math.abs(tanRight - tanLeft));
+				debugTrace("tangent to the right = " + (tanRight / Math.PI * 180));
+				debugTrace("tangent to the left  = " + (tanLeft / Math.PI * 180));
+				
+				this.cornerBisect[n] = {x: -Math.cos((tanRight + tanLeft) / 2), y: Math.sin((tanRight + tanLeft) / 2)};
+
+				// Draw a line representing the bisector
+				var debugBisectorLineLength = 20;
+				//debugDrawLine(this.beziers[n].pointA.x - this.cornerBisect[n].x * debugBisectorLineLength,
+				//			  this.beziers[n].pointA.y - this.cornerBisect[n].y * debugBisectorLineLength, 
+				//			  this.beziers[n].pointA.x + this.cornerBisect[n].x * debugBisectorLineLength, 
+				//			  this.beziers[n].pointA.y + this.cornerBisect[n].y * debugBisectorLineLength)
+			}
+		}
+	}
+	this.vertexIsCorner[n] = false;
+	this.startLength[n] = this.length;
+}
+
+CompoundBezier.prototype.getNormalizedVertexDistances = function()
+{
+	var retArray = [];
+
+	//debugTrace("Getting normalized vertex distances on a CompoundBezier with " + this.startLength.length + " vertices")
+	
+	for(var n = 0; n < this.startLength.length; n++)
+		retArray.push(this.startLength[n] / this.length);
+
+	//debugTrace("getNormalizedVertexDistances: " + retArray);
+
+	return retArray;
+}
+
+CompoundBezier.prototype.getIndexFromLength = function(_len)
+{
+	if(_len > this.length)
+		_len = this.length;
+	if(_len < 0)
+		_len = 0;
+	//debugTrace("getting point at " + _len + " in path of length " + this.length);
+	var top = this.edges.length;
+	var bottom = 0;
+
+	//debugTrace("bottom: " + bottom + ", middle: " + middle + ", top: " + top);
+	//debugTrace("len: " + _len + ", bottom: " + this.startLength[bottom] + ", bottom + 1: " + this.startLength[bottom + 1] + ", top: " + this.startLength[top]);
+
+	//var count = 0; 
+	// First find the bezier our point is in
+	while(this.startLength[bottom + 1] < _len && this.startLength[bottom + 1] != this.length)
+	{
+		//debugTrace("getpointfromlength: count = " + count++);
+		var middle = ((top + bottom) / 2) | 0;
+
+		//debugTrace("bottom: " + bottom + ", middle: " + middle + ", top: " + top);
+		//debugTrace("len: " + _len + ", bottom: " + this.startLength[bottom] + ", middle: " + this.startLength[middle] + ", top: " + this.startLength[top]);
+
+		if(this.startLength[middle] < _len)
+			bottom = middle;
+		else
+			top = middle;
+	}
+
+	return bottom;
+}
+
+CompoundBezier.prototype.getFillFromIndex = function(_index)
+{
+	//debugTrace("getFillFromIndex(" + _index + ")");
+	if(_index < 0)
+		return this.edges[0].fill;
+	else if(_index >= this.edges.length)
+		return this.edges[this.edges.length - 1].fill
+	else return this.edges[_index].fill;
+}
+
+
+CompoundBezier.prototype.getThicknessFromLength = function(_len)
+{
+	var bottom = this.getIndexFromLength(_len);
+	// Now bottom is the index of the bezier that has our point.
+
+	thickness = this.edges[bottom].thickness;
+
+	//if(thickness === undefined)
+	//	thickness = 1;
+
+	return thickness;
+}
+
+CompoundBezier.prototype.getThicknessLinear = function(_s)
+{
+	return this.getThicknessFromLength(_s * this.length);
+}
+
+CompoundBezier.prototype.getPointFromLength = function(_len)
+{
+	var bottom = this.getIndexFromLength(_len);
+	// Now bottom is the index of the bezier that has our point.
+
+	//debugTrace("startLen[" + bottom + "] = " + this.startLength[bottom]);
+	//debugTrace("in getPointFromLength: bezier " + bottom + " has length " + this.beziers[bottom].getLength());
+	var retPt = this.beziers[bottom].getPointFromLength(_len - this.startLength[bottom]);
+
+	//debugTrace("for length " + _len + ", point is at " + retval.x + ", " + retval.y);
+	//debugTrace("CompoundBezier.prototype.getPointFromLength(" + _len + ") returns " + retPt.x + ", " + retPt.y);
+
+	return retPt;
+}
+
+CompoundBezier.prototype.getPointLinear = function(_s) // 0 <= _s <= 1
+{
+	//debugTrace("calling getPointLinear(" + _s + ")");
+	//debugTrace("calling getPointFromLength(" + (_s * this.length) + ")");
+	var retPt = this.getPointFromLength(_s * this.length);
+	//debugTrace("CompoundBezier.prototype.getPointLinear(" + _s + ") on CompoundBezier with length " + this.length);
+	//debugTrace("CompoundBezier.prototype.getPointLinear(" + _s + ") returns " + retPt.x + ", " + retPt.y);
+	return retPt;
+}
+
+CompoundBezier.prototype.linearPointIsCorner = function(_s) // 0 <= _s <= 1
+{
+	var len = _s * this.length;
+	var bottom = this.getIndexFromLength(len);
+	
+	// If it's very close to the start of this bezier
+	if(len - this.startLength[bottom] < CORNER_DISTANCE_TOLERANCE && this.vertexIsCorner[bottom])
+		return true;
+	// If it's very close to the end of this bezier
+	if(this.startLength[bottom + 1] - len < CORNER_DISTANCE_TOLERANCE && this.vertexIsCorner[bottom + 1])
+		return true;
+	
+	// Not a corner
+	return false;
+}
+
+CompoundBezier.prototype.getBrushXFromStrokeX = function(_x)
+{
+	var brushX;
+
+	if(this.threeSlice)
+	{
+		if(_x < this.strokeExpansionLeft) // left section of the 3-slice
+			brushX = _x / this.threeSliceThickness + this.brushLeft;
+		else if(_x > this.strokeExpansionRight) // right section of the 3-slice
+			brushX = this.brushExpansionRight + (_x - this.strokeExpansionRight) / this.threeSliceThickness ;
+		else // middle section of the 3-slice
+			brushX = this.brushExpansionLeft +  (_x - this.strokeExpansionLeft) / this.strokeLengthMiddle * this.brushLengthMiddle;
+	}
+	else
+		brushX = this.brushLeft + _x / this.length * (this.brushRight - this.brushLeft);
+
+	if(_x < this.strokeExpansionLeft)
+	{
+		//debugTrace("----------------- getBrushXFromStrokeX ----------------------");
+		//debugTrace("stroke X: " + _x);
+		//debugTrace(" brush X: " + brushX);
+	}
+
+	return brushX;
+}
+
+CompoundBezier.prototype.getTangentVectorLinear = function(_t, _leftToRight)
+{
+	var len = _t * this.length;
+
+	var top = this.edges.length;
+	var bottom = 0;
+
+	if(_leftToRight === undefined)
+		_leftToRight = true;
+
+	// Clamp the value if it's within a certain tolerance of distance from a vertex
+	for(var n = 0; n < this.startLength.length; n++)
+	{
+		//debugTrace("-----------");
+		//debugTrace("distance: " + Math.abs(len - this.startLength[n]));
+		if(Math.abs(len - this.startLength[n]) < CORNER_DISTANCE_TOLERANCE)
+		{
+			//debugTrace("clamping " + len + " to " + this.startLength[n]);
+			len = this.startLength[n];
+			break;
+		}
+	}
+
+	//debugTrace("bottom: " + bottom + ", top: " + top);
+	//debugTrace("len: " + len + ", bottom: " + this.startLength[bottom] + ", top: " + this.startLength[top]);
+	// First find the bezier our point is in
+	var middle;
+	if(_leftToRight)
+		while(this.startLength[bottom + 1] < len && this.startLength[bottom + 1] != this.length)
+		{
+			middle = ((top + bottom) / 2) | 0;
+
+			//debugTrace("bottom: " + bottom + ", middle: " + middle + ", top: " + top);
+			//debugTrace("len: " + _len + ", bottom: " + this.startLength[bottom] + ", middle: " + this.startLength[middle] + ", top: " + this.startLength[top]);
+
+			if(this.startLength[middle] < len)
+				bottom = middle;
+			else top = middle;
+		}
+	else
+		while(this.startLength[bottom + 1] <= len && this.startLength[bottom + 1] != this.length)
+		{
+			middle = ((top + bottom) / 2) | 0;
+
+			//debugTrace("bottom: " + bottom + ", middle: " + middle + ", top: " + top);
+			//debugTrace("len: " + _len + ", bottom: " + this.startLength[bottom] + ", middle: " + this.startLength[middle] + ", top: " + this.startLength[top]);
+
+			if(this.startLength[middle] <= len)
+				bottom = middle;
+			else top = middle;
+		}
+
+
+	// Now bottom is the index of the bezier that has our point.
+
+	//debugTrace("bottom: " + bottom + ", calling bezier.getParamFromLength(" + (len - this.startLength[bottom]) + ")");
+	var param = this.beziers[bottom].getParamFromLength(len - this.startLength[bottom]);
+	//debugTrace("... which returned " + param);
+
+	return this.beziers[bottom].getTangentVector(param);
+}
+
+CompoundBezier.prototype.setBrushBounds = function(boundsElement)
+{
+
+	// base the bounds on the passed element
+	var halfWidth = boundsElement.width / 2;
+	var halfHeight = boundsElement.height / 2;
+
+	this.brushX   = boundsElement.left + halfWidth;
+	this.brushY   = boundsElement.top + halfHeight;
+	//debugTrace("brush Y: " + this.brushY);
+
+	this.brushLeft   = boundsElement.left;
+	this.brushTop    = boundsElement.top;
+	this.brushRight  = this.brushLeft + boundsElement.width;
+	this.brushBottom = this.brushTop + boundsElement.height;
+
+	this.brushWidth  = boundsElement.width;
+	this.brushHeight = boundsElement.height;
+
+	//debugTrace("Brush Bounds:");
+	//debugTrace(this.brushLeft + ", " + this.brushTop + ", " + this.brushRight + ", " + this.brushBottom);
+}
+
+////////////////////////////////////////////////////////////
+// Calculate 3-slice expansion parameters of the brush
+////////////////////////////////////////////////////////////
+
+CompoundBezier.prototype.setBrushExpansionBounds = function(expansionBoundsElement)
+{
+	if(expansionBoundsElement)
+	{
+		//debugTrace("Setting expansion bounds");
+		this.threeSlice = true;
+
+		// to reduce complexity let's assume a constant thickness when calculating 3-slice
+		this.threeSliceThickness = this.getThicknessLinear(0);
+
+		// Brush 3-slice element bounds
+		this.brushExpansionLeft   = expansionBoundsElement.left;
+		this.brushExpansionRight  = this.brushExpansionLeft + expansionBoundsElement.width;
+
+		// The length of the 3-slice sections on the brush
+		this.brushLengthLeft   = this.brushExpansionLeft - this.brushLeft;
+		this.brushLengthMiddle = this.brushExpansionRight - this.brushExpansionLeft
+		this.brushLengthRight  = this.brushRight - this.brushExpansionRight;
+
+		// The length of the 3-slice sections on the stroke
+		this.strokeLengthLeft   = this.brushLengthLeft * this.threeSliceThickness;
+		this.strokeLengthRight  = this.brushLengthRight * this.threeSliceThickness;
+		this.strokeLengthMiddle = this.length - this.strokeLengthRight - this.strokeLengthLeft;
+
+		this.strokeExpansionLeft = this.strokeLengthLeft;
+		this.strokeExpansionRight = this.strokeLengthLeft + this.strokeLengthMiddle;
+
+		// If, when this brush is applied to this stroke, the 3-slice would have end 
+		// sections that would be longer than the whole stroke, ignore 3-slice and apply
+		// the brush as normal.
+		if(this.strokeLengthMiddle <= 0 ) 
+		{
+			this.threeSlice = false;
+			//debugTrace("----------- 3-slice expansion params -----------");
+			//debugTrace("3-slice is too long. Switching to boring scaling.");
+		}
+		else
+		{
+			// Print out the dimensions of the brush and stroke 3-slice boundaries
+
+			//debugTrace("----------- 3-slice expansion params -----------");
+			//debugTrace("this.threeSliceThickness  = " + this.threeSliceThickness  );
+			//debugTrace("this.brushExpansionLeft   = " + this.brushExpansionLeft   );
+			//debugTrace("this.brushExpansionRight  = " + this.brushExpansionRight  );
+			//debugTrace("this.brushLengthLeft      = " + this.brushLengthLeft      );
+			//debugTrace("this.brushLengthMiddle    = " + this.brushLengthMiddle    );
+			//debugTrace("this.brushLengthRight     = " + this.brushLengthRight     );
+			//debugTrace("this.strokeLengthLeft     = " + this.strokeLengthLeft     );
+			//debugTrace("this.strokeLengthMiddle   = " + this.strokeLengthMiddle   );
+			//debugTrace("this.strokeLengthRight    = " + this.strokeLengthRight    );
+			//debugTrace("this.strokeExpansionLeft  = " + this.strokeExpansionLeft  );
+			//debugTrace("this.strokeExpansionRight = " + this.strokeExpansionRight );
+		}
+
+	}
+	else
+	{
+		this.threeSlice = false;
+	}
+}
+
+////////////////////////////////////////////////////////////
+// Take a brush X coord and return the distance of the 
+// corresponding point along path of the stroke, where 0 is
+// the "left" end of the stroke, 1 is the "right" end.
+////////////////////////////////////////////////////////////
+
+CompoundBezier.prototype.getNormStrokeDist = function(_x)
+{
+	var normStrokeDist;
+
+	// Calculate the X coord in the stroke based on the one in the brush
+	if(this.threeSlice)
+	{
+		// figure out X coord in brush stroke based on 3-slice sections
+		var rawStrokeDist;
+		var thickness = this.threeSliceThickness;
+		if (_x < this.brushExpansionLeft)        // left section of the 3-slice
+			rawStrokeDist = thickness * (_x - this.brushLeft);
+		else if (_x <= this.brushExpansionRight) // middle section of the 3-slice
+			rawStrokeDist = this.strokeLengthLeft + (_x - this.brushExpansionLeft) / this.brushLengthMiddle * this.strokeLengthMiddle;
+		else                                         // right section of the 3-slice
+			rawStrokeDist = this.length - this.strokeLengthRight + thickness * (_x - this.brushExpansionRight)
+
+		normStrokeDist = rawStrokeDist / this.length;
+
+		if(_x > this.brushExpansionLeft && _x < this.brushExpansionRight)
+		{
+			//debugTrace("------- map brush X to path X -------");
+			//debugTrace("this.brushExpansionLeft = " + this.brushExpansionLeft);
+			//debugTrace("Brush X = " + _x);
+			//debugTrace("normStrokeDist = " + normStrokeDist);
+		}
+	}
+	else // no 3-slice means normalized X coord is same in stroke and brush
+		normStrokeDist = (_x - this.brushLeft) / this.brushWidth;
+
+	return normStrokeDist;
+}
+////////////////////////////////////////////////////////////
+// Map a point from the brush symbol onto the path
+////////////////////////////////////////////////////////////
+
+CompoundBezier.prototype.getBrushPoint = function(_inPt)
+{
+	var rawBrushDist; 
+	var normBrushDist; // normalized X coord in the brush
+	var outPt;
+	var tanVec; 
+	var thickness;
+	var normalVec;
+
+	// Calculate the x position in the brush
+	rawBrushDist = _inPt.x - this.brushLeft;
+	normBrushDist = rawBrushDist / this.brushWidth;
+
+	// If the point is outside the brush's left and right bounds, return a point straight out from the endpoints of the brush
+	if(normBrushDist < 0)
+	{
+		//debugTrace("a point at t < 0");
+		outPt = this.getPointLinear(0);
+		thickness = this.getThicknessLinear(0);
+		tanVec = normalizeVector(this.getTangentVectorLinear(0));
+		normalVec = {x: -tanVec.y, y: tanVec.x};     // perpendicular to the tangent
+
+		outPt.x += ((_inPt.x - this.brushLeft) * tanVec.x + (_inPt.y - this.brushY) * normalVec.x) * thickness;
+		outPt.y += ((_inPt.x - this.brushLeft) * tanVec.y + (_inPt.y - this.brushY) * normalVec.y) * thickness;
+	}
+	else if(normBrushDist > 1)
+	{
+		//debugTrace("a point at t > 1");
+		outPt = this.getPointLinear(1);
+		thickness = this.getThicknessLinear(1);
+		tanVec = normalizeVector(this.getTangentVectorLinear(1));
+		normalVec = {x: -tanVec.y, y: tanVec.x};     // perpendicular to the tangent
+
+		outPt.x += ((_inPt.x - this.brushRight) * tanVec.x + (_inPt.y - this.brushY) * normalVec.x) * thickness;
+		outPt.y += ((_inPt.x - this.brushRight) * tanVec.y + (_inPt.y - this.brushY) * normalVec.y) * thickness;
+	}
+	else // 0 <= normBrushDist <= 1
+	{
+		var normStrokeDist = this.getNormStrokeDist(_inPt.x);// normalized dist from "left" end of the stroke
+
+		outPt = this.getPointLinear(normStrokeDist);
+		thickness = this.getThicknessLinear(normStrokeDist);
+
+		var tanVec1 = normalizeVector(this.getTangentVectorLinear(normStrokeDist, false));
+		var tanVec2 = normalizeVector(this.getTangentVectorLinear(normStrokeDist, true));
+		tanVec = normalizeVector({x: tanVec1.x + tanVec2.x, y: tanVec1.y + tanVec2.y});
+		//debugTrace("tanVec 1: " + tanVec1.x + ", " + tanVec1.y);
+		//debugTrace("tanVec 2: " + tanVec2.x + ", " + tanVec2.y);
+		//debugTrace("tanVec: " + tanVec.x + ", " + tanVec.y);
+
+		normalVec = {x: -tanVec.y, y: tanVec.x};     // perpendicular to the tangent
+
+		outPt.x += normalVec.x * (_inPt.y - this.brushY) * thickness;
+		outPt.y += normalVec.y * (_inPt.y - this.brushY) * thickness;
+	}
+	return outPt;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////
+// CompoundBezier.prototype.getBrushPointAndVector = function(_inPt, _inVec, _leftToRight)
+//
+// Returns true if the point was clipped by a corner.
+///////////////////////////////////////////////////////////////////////////////////////////
+
+CompoundBezier.prototype.getBrushPointAndVector = function(_inPt, _inVec, _leftToRight)
+{
+	var outVec = {};
+	var rawBrushDist = _inPt.x - this.brushLeft;
+	var normBrushDist = rawBrushDist / this.brushWidth;
+	var outPt;
+	var thickness;
+	var tanVec;
+	var normalVec;
+	var normStrokeDist;
+	
+	// First make sure normBrushDist isn't just a tiny bit beyond the ends of the brush due to math imprecision
+	if(normBrushDist > -ENDPOINT_PRECISION_THRESHOLD && normBrushDist < 0)
+	{
+		//debugTrace("clamping " + normBrushDist + " to 0")
+		normBrushDist = 0;
+	}
+	else if(normBrushDist < (1 + ENDPOINT_PRECISION_THRESHOLD) && normBrushDist > 1)
+	{
+		//debugTrace("clamping " + normBrushDist + " to 1")
+		normBrushDist = 1;
+	}
+	
+	//debugTrace("*** in vector: " + _inVec.x + ", " + _inVec.y);
+	//debugTrace("*** in point:  " + _inPt.x + ", " + _inPt.y);
+		
+	// If nurmDist < 0 or > 1 then we're dealing with endcaps, so don't 
+	// stretch them out or put them on the curve.
+	if(normBrushDist < 0 || (normBrushDist == 0 && _inVec.x <= 0))
+	{
+		//debugTrace("------------ < 0 get brush point and vector at t = " + normBrushDist);
+		//debugTrace("in vector:      " + _inVec.x + ", " + _inVec.y);
+		//debugTrace("in point:       " + _inPt.x + ", " + _inPt.y);
+		//debugTrace("a point at t < 0");
+		outPt = this.getPointLinear(0);
+		thickness = this.getThicknessLinear(0);
+		normStrokeDist = 0;
+		tanVec = normalizeVector(this.getTangentVectorLinear(0));
+		normalVec = {x: -tanVec.y, y: tanVec.x};     // perpendicular to the tangent
+
+		outPt.x += ((_inPt.x - this.brushLeft) * tanVec.x + (_inPt.y - this.brushY) * normalVec.x) * thickness;
+		outPt.y += ((_inPt.x - this.brushLeft) * tanVec.y + (_inPt.y - this.brushY) * normalVec.y) * thickness;
+
+		outVec.x = (_inVec.x * tanVec.x + _inVec.y * normalVec.x) * thickness;
+		outVec.y = (_inVec.x * tanVec.y + _inVec.y * normalVec.y) * thickness;
+		//debugTrace("<0 outVec is "  + outVec.x + ", " + outVec.y);
+	}
+	else if(normBrushDist > 1 || (normBrushDist == 1 && _inVec.x >= 0))
+	{
+		//debugTrace("------------ > 0 get brush point and vector at t = " + normBrushDist);
+		//debugTrace("in vector:      " + _inVec.x + ", " + _inVec.y);
+		//debugTrace("in point:       " + _inPt.x + ", " + _inPt.y);
+		//debugTrace("a point at t > 1");
+		outPt = this.getPointLinear(1);
+		thickness = this.getThicknessLinear(1);
+		normStrokeDist = 1;
+		tanVec = normalizeVector(this.getTangentVectorLinear(1));
+		normalVec = {x: -tanVec.y, y: tanVec.x};     // perpendicular to the tangent
+
+		outPt.x += ((_inPt.x - this.brushRight) * tanVec.x + (_inPt.y - this.brushY) * normalVec.x) * thickness;
+		outPt.y += ((_inPt.x - this.brushRight) * tanVec.y + (_inPt.y - this.brushY) * normalVec.y) * thickness;
+
+		outVec.x = (_inVec.x * tanVec.x + _inVec.y * normalVec.x) * thickness;
+		outVec.y = (_inVec.x * tanVec.y + _inVec.y * normalVec.y) * thickness;
+		//debugTrace(">0 outVec is "  + outVec.x + ", " + outVec.y);
+	}
+	else // 0 <= normBrushDist <= 1
+	{
+		//debugTrace("------------  0 <= " + normBrushDist + " <= 1 at ");
+		var vectorStretch;
+		thickness = this.getThicknessLinear(normStrokeDist);
+		if(this.threeSlice)
+		{
+			// Figure out how much to stretch the tangent in the X direction based on the position in the three-slice
+			if (_inPt.x > this.brushExpansionLeft && _inPt.x < this.brushExpansionRight) // middle section of the 3-slice or
+			{
+				//debugTrace("getBrushPointAndVector Middle section of the 3-slice");
+				vectorStretch = this.strokeLengthMiddle / this.brushLengthMiddle;  // apply the appropriate stretch
+			}
+			else if(_inPt.x == this.brushExpansionLeft && _inVec.x > 0) // left end of the middle section and the vector points right or
+			{
+				//debugTrace("getBrushPointAndVector left end of the 3-slice, pointing right");
+				vectorStretch = this.strokeLengthMiddle / this.brushLengthMiddle;  // apply the appropriate stretch
+			}
+			else if(_inPt.x == this.brushExpansionRight && _inVec.x < 1)                       // right end of the middle section and the vector points left
+			{
+				//debugTrace("getBrushPointAndVector right end of the 3-slice, pointing left");
+				vectorStretch = this.strokeLengthMiddle / this.brushLengthMiddle;  // apply the appropriate stretch
+			}
+			else                                         // end section of the 3-slice
+			{
+				//debugTrace("getBrushPointAndVector end section of the 3-slice");				
+				vectorStretch = thickness;
+			}
+		}
+		else 
+		{
+			//debugTrace("getBrushPointAndVector within the bounds of a non-3-slice brush");
+			vectorStretch = this.length / this.brushWidth;
+		}
+		//_inVec.x *= vectorStretch;
+
+		normStrokeDist = this.getNormStrokeDist(_inPt.x);// normalized dist from the "left" end of the stroke
+
+		outPt = this.getPointLinear(normStrokeDist);
+		
+		//debugTrace("*** normStrokeDist = " + normStrokeDist);
+		//debugTrace("*** vectorStretch = " + vectorStretch);
+		//debugTrace("*** Initial out point coords:    " + outPt.x + ", " + outPt.y);
+		//debugTrace("*** Initial out point thickness: " + thickness);
+		
+
+		if(CORNER_STYLE == CORNER_POINTY)
+		{
+			// Go out straight from a corner
+			var tanVec1 = normalizeVector(this.getTangentVectorLinear(normStrokeDist, true));
+			var tanVec2 = normalizeVector(this.getTangentVectorLinear(normStrokeDist, false));
+			tanVec = normalizeVector({x: tanVec1.x + tanVec2.x, y: tanVec1.y + tanVec2.y});
+			//debugTrace("tanVec 1: " + tanVec1.x + ", " + tanVec1.y);
+			//debugTrace("tanVec 2: " + tanVec2.x + ", " + tanVec2.y);
+			//debugTrace("tanVec: " + tanVec.x + ", " + tanVec.y);
+
+			normalVec = {x: -tanVec.y, y: tanVec.x};     // perpendicular to the tangent
+			if(_leftToRight)
+				tanVec = tanVec2;
+			else tanVec = tanVec1;
+
+			var tanAngle1 = Math.atan2(-tanVec1.y, -tanVec1.x);
+			var tanAngle2 = Math.atan2(tanVec2.y, tanVec2.x);
+			var corner_angle = tanAngle2 - tanAngle1;
+			while(corner_angle > Math.PI * 2)
+				corner_angle -= Math.PI * 2;
+			while(corner_angle < 0)
+				corner_angle += Math.PI * 2;
+
+			/*
+			//debugTrace("----------------");
+			//debugTrace("Brush norm distance = " + normBrushDist);
+			//debugTrace("Stroke norm distance = " + normStrokeDist);
+			//debugTrace("tanAngle1 = " + tanAngle1);
+			//debugTrace("tanAngle2 = " + tanAngle2);
+			//debugTrace("corner angle " + corner_angle);
+			//debugTrace("inPt.y = " + _inPt.y + ", brushY = " + this.brushY);
+			*/
+
+			// If corner_angle > PI then it's a right turn. < 0 means a left turn. 
+			if((corner_angle < Math.PI && _inPt.y > this.brushY) || 
+			   (corner_angle > Math.PI && _inPt.y < this.brushY))
+			{
+				var thickness_mult = 1.0 / Math.sin(corner_angle / 2);
+				//debugTrace("multiplier is " + thickness_mult);
+				thickness *= thickness_mult;
+			}
+
+		}
+		else // CORNER_CUT or CORNER_ROUND
+		{		
+			// Give a cut off corner
+			tanVec = normalizeVector(this.getTangentVectorLinear(normDist, !_leftToRight));
+			normalVec = {x: -tanVec.y, y: tanVec.x};     // perpendicular to the tangent
+		}
+
+		outPt.x += normalVec.x * (_inPt.y - this.brushY) * thickness;
+		outPt.y += normalVec.y * (_inPt.y - this.brushY) * thickness;
+
+		var curveRadius = this.GetRadiusOfCurvatureFromLength(normBrushDist * this.length);
+		var vectorStretchFromCurve = 1;//(curveRadius - (_inPt.y - this.brushY) * thickness) / curveRadius; // when y = 0 the stretch will be 1 (i.e. unchanged)
+
+		//debugTrace("*** final out point coords: " + outPt.x + ", " + outPt.y);
+		//debugTrace("*** _inVec: " + _inVec.x + ", " + _inVec.y);
+		//debugTrace("*** tanVec: " + tanVec.x + ", " + tanVec.y);
+		//debugTrace("*** normalVec: " + normalVec.x + ", " + normalVec.y);
+
+		//debugTrace("Radius of curvature: " + curveRadius);
+		//debugTrace("VECTOR STRETCH due to stretching brush: " + vectorStretch);
+		//debugTrace("VECTOR STRETCH due to curvature at inPt = " + _inPt.x + ", " + _inPt.y + ": " + vectorStretchFromCurve);
+		var inVecXWithStretch = _inVec.x * vectorStretch * vectorStretchFromCurve;
+		//debugTrace("STRETCHED VECTOR X: " + inVecXWithStretch);
+		
+		outVec.x = inVecXWithStretch * tanVec.x;
+		outVec.y = inVecXWithStretch * tanVec.y;
+		outVec.x += _inVec.y * normalVec.x * thickness;
+		outVec.y += _inVec.y * normalVec.y * thickness;
+		//debugTrace("*** final out point vector: " + outVec.x + ", " + outVec.y);
+	}
+
+
+	//debugTrace("tangent vector:  " + tanVec.x + ", " + tanVec.y);
+	//debugTrace("normal vector:   " + normalVec.x + ", " + normalVec.y);
+	//debugTrace("this.brushWidth: " + this.brushWidth);
+	//debugTrace("thickness:       " + thickness);
+
+	// Now multiply the normal by _inPt.y and add it to outPt to get the final value;
+	//debugTrace(" normalVec.x = " +  normalVec.x);
+	//debugTrace(" normalVec.y = " +  normalVec.y);
+	//debugTrace("_inPt.y = " + _inPt.y);
+	//debugTrace("this.brushY = " + this.brushY);
+	//debugTrace("outPt.x = " + outPt.x);
+	//debugTrace("outPt.y = " + outPt.y);
+
+	//debugTrace("in vector:      " + _inVec.x + ", " + _inVec.y);
+	//debugTrace("tan vector:     " + tanVec.x + ", " + tanVec.y);
+	//debugTrace("normal vector:  " + normalVec.x + ", " + normalVec.y);
+
+	// Clip the point and vector so we don't get overlaps on corners
+	var clipped = false;
+	clipped = this.cornerClipBrushPointAndVector(outPt, outVec, normStrokeDist	);
+	//debugTrace("clipped point is " + outPt.x + ", " + outPt.y);
+	
+	_inPt.x = outPt.x;
+	_inPt.y = outPt.y;
+
+	_inVec.x = outVec.x;
+	_inVec.y = outVec.y;
+	
+	return clipped;
+}
+
+//-------------------------------------------------------------------------
+// Clips a point to corner bisectors (if they exist), in order to avoid
+// overlaps at corners. Returns true if the point was clipped
+
+CompoundBezier.prototype.cornerClipBrushPointAndVector = function(_pt, _vec, _normStrokeDist)
+{
+	//debugTrace("cornerClipBrushPointAndVector _pt = " + _pt.x + ", " + _pt.y);
+	//debugTrace("cornerClipBrushPointAndVector _vec = " + _vec.x + ", " + _vec.y);
+	//debugTrace("cornerClipBrushPointAndVector _normStrokeDist = " + _normStrokeDist);
+
+	if(_normStrokeDist > 0 && _normStrokeDist < 1)
+	{
+		var bezNum = this.getIndexFromLength(_normStrokeDist * this.length);
+		//debugTrace("cornerClipBrushPointAndVector: checking for corners on bezier #" + bezNum);
+		
+		// if this point is next to a corner
+		if(this.vertexIsCorner[bezNum] || this.vertexIsCorner[bezNum + 1])
+		{
+			//debugTrace("cornerClipBrushPointAndVector: there's a corner");
+
+			// Use the middle control point of this bezier as a reference. It will always be "inside" both corner bisectors.
+			var refPt = this.beziers[bezNum].pointB;
+			//var refPt = {x: (this.beziers[bezNum].pointA.x + this.beziers[bezNum].pointC.x) / 2,
+			//			 y: (this.beziers[bezNum].pointA.y + this.beziers[bezNum].pointC.y) / 2}
+			
+			// get "which side" values for the reference point
+			var rootInsideLeftBisector;
+			var rootInsideRightBisector;
+			
+			// get "which side" values for the passed point
+			var ptInsideLeftBisector;
+			var ptInsideRightBisector;
+			var ptIsInsideLeft = true;
+			var ptIsInsideRight = true;
+			
+			//debugTrace("ref     point: " + refPt.x + ", " + refPt.y);
+			//debugTrace("passed  point: " + _pt.x + ", " + _pt.y);
+
+			// if there's a left corner
+			if(this.vertexIsCorner[bezNum])
+			{
+				//debugTrace("cornerClipBrushPointAndVector: there's a left corner. Finding ref point's relation to bisector");
+				rootInsideLeftBisector = whichSide(refPt, this.beziers[bezNum].pointA, this.cornerBisect[bezNum]);
+				//debugTrace("cornerClipBrushPointAndVector: It was " + rootInsideLeftBisector + ". Finding point's relation to bisector");
+				ptInsideLeftBisector = whichSide(_pt, this.beziers[bezNum].pointA, this.cornerBisect[bezNum]);
+				//debugTrace("cornerClipBrushPointAndVector: It was " + ptInsideLeftBisector);
+				// The point is inside the bisector if it's on the same side as the reference point -- if they both have the same side in calls to whichSide()
+				ptIsInsideLeft = (ptInsideLeftBisector * rootInsideLeftBisector >= 0);
+			}
+			// if there's a right corner
+			if(this.vertexIsCorner[bezNum + 1])
+			{
+				//debugTrace("cornerClipBrushPointAndVector: there's a right corner. Finding root's relation to bisector");
+				rootInsideRightBisector = whichSide(refPt, this.beziers[bezNum].pointC, this.cornerBisect[bezNum + 1]);
+				//debugTrace("cornerClipBrushPointAndVector: It was " + rootInsideRightBisector + ". Finding point's relation to bisector");
+				ptInsideRightBisector = whichSide(_pt, this.beziers[bezNum].pointC, this.cornerBisect[bezNum + 1]);
+				//debugTrace("cornerClipBrushPointAndVector: It was " + ptInsideRightBisector);
+				// The point is inside the bisector if it's on the same side as the reference point -- if they both have the same side in calls to whichSide()
+				ptIsInsideRight = (ptInsideRightBisector * rootInsideRightBisector >= 0);;
+			}
+			
+			// Three possibilities:
+			// 1. the point isn't clipped
+			// 2. it's clipped by the left bisector
+			// 3. it's clipped by the right bisector
+			// 4. it's clipped by both bisectors
+			//
+			// It should work fine to treat option 4 as simply option 2 plus option 3
+			
+			if(ptIsInsideRight && ptIsInsideLeft) // nothing to do. Return without changing anything
+				return false;
+			
+			var outPt;
+			
+			if(!ptIsInsideLeft)
+			{
+				outPt = vectorProject(_pt, this.beziers[bezNum].pointA, this.cornerBisect[bezNum]);
+				//debugTrace("clipped a point to left bisector " + bezNum);
+			}
+			if(!ptIsInsideRight)
+			{
+				outPt = vectorProject(_pt, this.beziers[bezNum].pointC, this.cornerBisect[bezNum + 1]);
+				//debugTrace("clipped a point to right bisector " + bezNum);
+			}
+			//debugTrace("Clipped _pt = " + outPt.x + ", " + outPt.y);
+			
+			// make the vector point at the same point it was pointing at before
+			_vec.x = _pt.x + _vec.x - outPt.x;
+			_vec.y = _pt.y + _vec.y - outPt.y;
+			//debugTrace("Vector points at " + _vec.x + ", " + _vec.y)
+			
+			_pt.x = outPt.x;
+			_pt.y = outPt.y;
+			
+			return true;
+		}
+		
+	}
+}
+
+//-------------------------------------------------------------------------
+// Returns the curvature at the given parameter
+
+CompoundBezier.prototype.GetRadiusOfCurvatureFromLength = function(_len)
+{
+	var bottom = this.getIndexFromLength(_len);
+	//debugTrace("RADIUS OF CURVATURE! Bezier #" + bottom + " of " + this.edges.length);
+	
+	var edgeParam = this.beziers[bottom].getParamFromLength(_len - this.startLength[bottom]);
+	//debugTrace("RADIUS OF CURVATURE! len = " + _len + ", t = " + edgeParam);
+	
+	return this.beziers[bottom].GetRadiusOfCurvature(edgeParam);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// End CompoundBezier
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+getVector = function(pt1, pt2)
+{
+	retval = {x: pt2.x - pt1.x, y: pt2.y - pt1.y}
+	//debugTrace("getVector retval = " + retval.x + ", " + retval.y);
+	return retval;
+}
+
+normalizeVector = function(pt)
+{
+	var magnitude = _v(pt);
+	var retval = {x: pt.x / magnitude, y: pt.y / magnitude};
+	//debugTrace("normalizeVector reval = " + retval.x + ", " + retval.y);
+	return retval;
+}
+
+getCos = function(pt1, pt2)
+{
+	n1 = normalizeVector(pt1);
+	n2 = normalizeVector(pt2);
+	var retval = n1.x * n2.x + n1.y * n2.y;
+	//debugTrace("getCos reval = " + retval);
+	return retval;
+}
+
+getCornerCos = function(edge1, edge2, reversed)
+{
+	var retval;
+	if(reversed) // reverse the vertices in the second edge
+		retval = getCos(getVector(edge1.pt1, edge1.pt2), getVector(edge2.pt2, edge2.pt1));
+	else retval = getCos(getVector(edge1.pt1, edge1.pt2), getVector(edge2.pt0, edge2.pt1));
+	//debugTrace("getCornerCos reval = " + retval);
+	return retval;
+}
+
+getBestNextEdge = function(edges, curIndex, direction)
+{
+	debugTrace("getBestNextEdge(" + curIndex + " , " + direction + ")");
+	var curActivePoint;
+	if(direction)
+		curActivePoint = edges[curIndex].pt2;
+	else 
+		curActivePoint = edges[curIndex].pt0;
+	var bestNextEdge = undefined;    // Index of the best edge to go to next
+	var bestNextEdgeCos = -1; // identical vector angle would be 1
+	var thisCos;
+	var connectionCount = 0;
+	var swapVertices = false;
+
+	for(var otherIndex = 0; otherIndex < edges.length; otherIndex++)
+	{
+		if(curIndex != otherIndex)
+		{
+			debugTrace("Checking to see if " + curIndex + " connects to " + otherIndex);
+			// If we've already found next and prev for this edge, don't look any more
+			//if(edgeOrd[curIndex].next !== undefined && edgeOrd[curIndex].prev !== undefined)
+			//	break;
+
+			var otherActivePoint;
+			var otherOppositePoint;
+
+
+			if(direction)
+			{
+				otherActivePoint   = edges[otherIndex].pt0;
+				otherOppositePoint = edges[otherIndex].pt2;
+			}
+			else
+			{
+				otherActivePoint   = edges[otherIndex].pt2;
+				otherOppositePoint = edges[otherIndex].pt0;
+			}
+			var otherMidPoint   = edges[otherIndex].pt1;
+
+			debugTrace("curActivePoint: " + coords_toString(curActivePoint));
+			debugTrace("otherActivePoint: " + coords_toString(otherActivePoint));
+			debugTrace("otherOppositePoint: " + coords_toString(otherOppositePoint));
+			
+			if(curActivePoint.x == otherActivePoint.x && curActivePoint.y == otherActivePoint.y)
+			{
+				debugTrace("CONNECTION FOUND!");
+				connectionCount++;
+
+				if(direction)
+					thisCos = getCornerCos(edges[curIndex], edges[otherIndex], false);
+				else 
+					thisCos = getCornerCos(edges[otherIndex], edges[curIndex], false);
+
+				//debugTrace("          cos angle from " + curIndex + " to " + otherIndex + " is " + thisCos);
+				//debugTrace("prev best cos angle from " + curIndex + " to " + bestNextEdge + " is " + bestNextEdgeCos);
+
+				if(bestNextEdge === undefined || (thisCos >= bestNextEdgeCos && !edges[otherIndex].claimed))
+				{
+					//debugTrace("setting best edge " + otherIndex);
+					bestNextEdgeCos = thisCos;
+					bestNextEdge = otherIndex;
+					swapVertices = false;
+				}
+
+				//debugTrace("1: edge " + curIndex + " goes to " + otherIndex);
+			}
+			else if(curActivePoint.x == otherOppositePoint.x && curActivePoint.y == otherOppositePoint.y)
+			{
+				connectionCount++;
+
+				if(direction)
+					thisCos = getCornerCos(edges[curIndex], edges[otherIndex], true); // use reversed vertices
+				else 
+					thisCos = getCornerCos(edges[otherIndex], edges[curIndex], true);
+
+				//debugTrace("          cos angle from " + curIndex + " to " + otherIndex + " is " + thisCos);
+				//debugTrace("prev best cos angle from " + curIndex + " to " + bestNextEdge + " is " + bestNextEdgeCos);
+
+				if(bestNextEdge === undefined || (thisCos >= bestNextEdgeCos && !edges[otherIndex].claimed))
+				{
+					//debugTrace("setting best edge " + otherIndex);
+					bestNextEdgeCos = thisCos;
+					bestNextEdge = otherIndex;
+					swapVertices = true;
+				}
+
+				//debugTrace("2: edge " + curIndex + " goes to " + otherIndex);
+			}
+		}
+	}	
+
+	debugTrace("3: bestNextEdge " + bestNextEdge);
+
+	if(bestNextEdge && !edges[bestNextEdge].claimed)
+	{
+		//if(connectionCount > 1)
+		//	//debugTrace("Warning: branch detected in flash line");
+		//debugTrace("bestNextEdge = " + bestNextEdge);
+
+		edges[bestNextEdge].claimed = true;
+
+		if(swapVertices)
+		{
+			var tempPt = edges[bestNextEdge].pt2;
+			edges[bestNextEdge].pt2 = edges[bestNextEdge].pt0;
+			edges[bestNextEdge].pt0 = tempPt;
+		}
+		
+		debugTrace("found next best edge from " + curIndex + " to " + bestNextEdge);
+		debugTrace("from: " + edges[curIndex].pt0.x + ", " + edges[curIndex].pt0.y);
+		debugTrace(" via: " + edges[curIndex].pt1.x + ", " + edges[curIndex].pt1.y);
+		debugTrace("  to: " + edges[curIndex].pt2.x + ", " + edges[curIndex].pt2.y);
+		debugTrace("from: " + edges[bestNextEdge].pt0.x + ", " + edges[bestNextEdge].pt0.y);
+		debugTrace(" via: " + edges[bestNextEdge].pt1.x + ", " + edges[bestNextEdge].pt1.y);
+		debugTrace("  to: " + edges[bestNextEdge].pt2.x + ", " + edges[bestNextEdge].pt2.y);
+		
+		return bestNextEdge;
+	}
+
+	//debugTrace("returning bestNextEdge = undefined");
+	return undefined;
+
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Returns an array of arrays of edges in their correct connected order
+///////////////////////////////////////////////////////////////////////////
+
+getEdgeOrderQuad = function(_edges)
+{
+	debugTrace("getEdgeOrderQuad()");
+	var otherStartPoint;
+	var otherEndPoint;
+	var curStartPoint;
+	var curEndPoint;
+	var curIndex;
+	var nextIndex;
+
+	var startEdge = undefined;
+
+	var edgeOrd = [];
+	var edges = [];
+	var nextEdges = [];
+
+	// Fill out the edges array with all the ones in _edges
+	for(var n = 0; n < _edges.length; n++)
+	{
+		var thickness;
+		var fill;
+		thickness = 1;
+		fill = undefined;
+
+		if(_edges[n].stroke !== undefined)
+		{
+			if(_edges[n].stroke.thickness !== undefined)
+				thickness = _edges[n].stroke.thickness;
+			if(_edges[n].stroke.shapeFill !== undefined)
+				fill = _edges[n].stroke.shapeFill;
+		}
+		//debugTrace("thickness of edge 2: " + thickness);
+		var temp = {pt0: _edges[n].getControl(0), 
+					pt1: _edges[n].getControl(1), 
+					pt2: _edges[n].getControl(2),
+					thickness: thickness,
+					fill: fill};
+		edges.push(temp);
+		debugTrace("getEdgeOrderQuad " + n);
+		debugTrace("                 " + temp.pt0.x + ", " + temp.pt0.y);
+		debugTrace("                 " + temp.pt1.x + ", " + temp.pt1.y);
+		debugTrace("                 " + temp.pt2.x + ", " + temp.pt2.y);
+
+	}
+
+	for(curIndex = 0; curIndex < edges.length; curIndex++)
+	{
+		// Zero out all the edge order entries
+		edgeOrd[curIndex] = {prev:undefined, next:undefined};
+	}
+
+	for(var startIndex = 0; startIndex < edges.length; startIndex++)
+	{
+		debugTrace("Checking out edge " + startIndex);
+		// If we haven't visited this edge yet
+		if(!edges[startIndex].claimed)
+		{
+			debugTrace("startIndex is unclaimed");
+			var bestNextEdge;
+
+			edges[startIndex].claimed = true;
+
+			// First search in reverse in case our start edge wasn't an end point
+			curIndex = startIndex;
+			do
+			{
+				nextIndex = undefined;
+				bestNextEdge = undefined;    // Index of the best edge to go to next
+
+				bestNextEdge = getBestNextEdge(edges, curIndex, false);
+				edgeOrd[curIndex].prev = nextIndex = bestNextEdge;
+				if(bestNextEdge)
+				{
+					debugTrace("" + nextIndex + " -> " + curIndex);
+					edgeOrd[nextIndex].next = curIndex;
+				}
+
+				// Now if nextIndex is set then Make that one the next edge to work on
+				curIndex = nextIndex; //edgeOrd[curIndex].next;
+				//debugTrace("curIndex: " + curIndex);
+			}
+			while(curIndex != startIndex && curIndex !== undefined );//&& confirm("curIndex is " + curIndex + ". Continue?"));
+
+			// Now search forward
+			curIndex = startIndex;
+			do
+			{
+				nextIndex = undefined;
+
+				bestNextEdge = getBestNextEdge(edges, curIndex, true);
+				edgeOrd[curIndex].next = nextIndex = bestNextEdge;
+				if(bestNextEdge)
+				{
+					debugTrace("" + curIndex + " -> " + nextIndex);
+					edgeOrd[nextIndex].prev = curIndex;
+				}
+
+				// Now if nextIndex is set then Make that one the next edge to work on
+				curIndex = nextIndex; //edgeOrd[curIndex].next;
+				//debugTrace("curIndex: " + curIndex);
+			}
+			while(curIndex != startIndex && curIndex !== undefined /*&& confirm("curIndex is " + curIndex + ". Continue?")*/);
+
+
+		}
+	}
+
+	var startArray = [];
+	startIndex = 0;
+	var thisPath;
+	var retArray = [];
+	var edgeVisited = [];
+
+	// Find all the edges with no previous edge
+	for(curIndex = 0; curIndex < edges.length; curIndex++)
+	{
+		edgeVisited[curIndex] = false;
+		if(edgeOrd[curIndex].prev === undefined)
+		{
+			startArray.push(curIndex);
+		}
+	}
+
+	//debugTrace("" + startArray.length + " start edges");
+
+	// Build arrays starting with all the edges with no previous edge
+	while(startArray.length)
+	{
+		curIndex = startIndex = startArray.pop();
+		//debugTrace("starting a path at " + edges[curIndex].pt0.x + ", " + edges[curIndex].pt0.y);
+		thisPath = [];
+
+		// Some variables to find a consistent "first" edge
+		// I'll be aiming for the lowest Y value -- topmost vertex
+		thisPath.firstIndex = 0;
+		thisPath.firstX = Number.MAX_VALUE;
+		thisPath.firstY = Number.MAX_VALUE;
+
+		do
+		{
+			//debugTrace("new edge " + curIndex + ": " + edges[curIndex].pt0.x + ", " + edges[curIndex].pt0.y + " -> " + edges[curIndex].pt2.x + ", " + edges[curIndex].pt2.y);
+
+			// Keep track of the topmost vertex
+			if(edges[curIndex].pt0.y < thisPath.firstY || (edges[curIndex].pt0.y == thisPath.firstY && edges[curIndex].pt0.x < thisPath.firstX))
+			{
+				thisPath.firstIndex = thisPath.length - 1;
+				thisPath.firstX = edges[curIndex].pt0.x;
+				thisPath.firstY = edges[curIndex].pt0.y;
+			}
+
+			thisPath.push(edges[curIndex]);
+			edgeVisited[curIndex] = true;
+			//debugTrace("edgeVisited[" + curIndex + "] = " + edgeVisited[curIndex]);
+			curIndex = edgeOrd[curIndex].next;
+		}
+		while(curIndex !== undefined && !edgeVisited[curIndex]);
+		retArray.push(thisPath);
+	}
+
+	// and now add arrays with edges that are unaccounted for. These should all be loops
+	for(startIndex = 0; startIndex < edges.length; startIndex++)
+	{
+		if(!edgeVisited[startIndex])
+		{			
+			curIndex = startIndex;
+
+			//debugTrace("2: starting a path at " + edges[curIndex].pt0.x + ", " + edges[curIndex].pt0.y);
+			thisPath = [];
+
+			// Some variables to find a consistent "first" edge
+			// I'll be aiming for the lowest Y value -- topmost vertex
+			thisPath.firstIndex = 0;
+			thisPath.firstX = Number.MAX_VALUE;
+			thisPath.firstY = Number.MAX_VALUE;
+
+			do
+			{
+				//debugTrace("new edge " + curIndex + ": " + edges[curIndex].pt0.x + ", " + edges[curIndex].pt0.y + " -> " + edges[curIndex].pt2.x + ", " + edges[curIndex].pt2.y);
+				//debugTrace("edgeVisited[" + curIndex + "] = " + edgeVisited[curIndex]);
+
+				// Keep track of the topmost vertex
+				if(edges[curIndex].pt0.y < thisPath.firstY || (edges[curIndex].pt0.y == thisPath.firstY && edges[curIndex].pt0.x < thisPath.firstX))
+				{
+					thisPath.firstIndex = thisPath.length - 1;
+					thisPath.firstX = edges[curIndex].pt0.x;
+					thisPath.firstY = edges[curIndex].pt0.y;
+				}
+
+				thisPath.push(edges[curIndex]);
+				edgeVisited[curIndex] = true;
+				curIndex = edgeOrd[curIndex].next;
+			}
+			while(curIndex !== undefined && curIndex != startIndex && !edgeVisited[curIndex]);
+
+			retArray.push(thisPath);
+		}
+	}
+
+	//debugTrace("Checking for loops that need to be rotated");
+
+	for(var nPath = 0; nPath < retArray.length; nPath++)
+	{
+		thisPath = retArray[nPath];
+		var firstPt = thisPath[0].pt0;
+		var lastPt = thisPath[thisPath.length - 1].pt2;
+		//debugTrace("Comparing " + firstPt.x + ", " + firstPt.y);
+		//debugTrace("       to " + lastPt.x + ", " + lastPt.y);
+		if(firstPt.x == lastPt.x && firstPt.y == lastPt.y) // A loop
+		{
+			// Rotate the edge array to have our "first" element first
+			//debugTrace("first index in a loop is " + thisPath.firstIndex + ": " + thisPath.firstX + ", " + thisPath.firstY);
+			thisPath.rotate(thisPath.firstIndex + 1);
+		}
+	}
+
+	// Sort the paths so they're always returned in a consistent order
+	retArray.sort(pathCompare);
+
+
+	return retArray;
+}
+
+// Comparison function for sorting paths in getEdgeOrderQuad()
+
+function pathCompare(a,b)	
+{
+	if(a.firstY != b.firstY)
+		return a.firstY - b.firstY;
+	if(a.firstX != b.firstY)
+		return a.firstX - b.firstX;
+	if(a[0].thickness != b[0].thickness)
+		return a[0].thickness - b[0].thickness;
+	if(a[0].fill === undefined && b[0].fill !== undefined)
+		return -1;
+	if(a[0].fill !== undefined && b[0].fill === undefined)
+		return 1;
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Apply a matrix transform to an edge array returned by getEdgeOrderQuad()
+///////////////////////////////////////////////////////////////////////////
+
+function transformEdges(mat, edgeArray)
+{
+	if(isIdentityMatrix(mat))
+	   return edgeArray;
+
+	var shapeNum;
+	var edgeNum;
+	var retArray = [];
+
+	// edgeArray is an array of arrays of edges. Let's transform all the vertices therein
+	for(shapeNum = 0; shapeNum < edgeArray.length; shapeNum++)
+	{
+		retArray[shapeNum] = [];
+		for(edgeNum = 0; edgeNum < edgeArray[shapeNum].length; edgeNum++)
+		{
+			retArray[shapeNum][edgeNum] = {pt0:       apply_transform(mat, edgeArray[shapeNum][edgeNum].pt0), 
+										   pt1:       apply_transform(mat, edgeArray[shapeNum][edgeNum].pt1), 
+										   pt2:       apply_transform(mat, edgeArray[shapeNum][edgeNum].pt2), 
+										   thickness: edgeArray[shapeNum][edgeNum].thickness, 
+										   fill:      edgeArray[shapeNum][edgeNum].fill};
+		}
+	}
+
+	return retArray;
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Return the angle of the given vector
+///////////////////////////////////////////////////////////////////////////
+
+function getAngle(vec)
+{
+	//debugTrace("getAngle " + vec.x + ", " + vec.y);
+	var retval = {};
+	if(vec.x !== 0)
+	{
+		//debugTrace("getAngle vec.x !== 0");
+		retval = Math.atan(vec.y / vec.x);
+	}
+	else 
+	{
+		//debugTrace("getAngle vec.x >= 0");
+		if(vec.y > 0)	
+			retval = Math.PI / 2.0;
+		else if(vec.y < 0)
+			retval = -Math.PI / 2.0;
+		else retval = 0;
+		//debugTrace("... and retval = " + retval);		
+	}
+	if(vec.x < 0)
+		retval += Math.PI;
+
+	if(retval < 0)
+		retval += Math.PI * 2;
+
+	//debugTrace("getAngle returning " + retval);	
+
+	return retval;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+// Test whether a bezier's bounding box intersects a vertical line at x
+/////////////////////////////////////////////////////////////////////////////////////
+
+boundsIntersectX = function(_edge, _x)
+{
+	var retval = Math.min(_edge.pt0.x, Math.min(_edge.pt1.x, _edge.pt2.x)) <= _x;
+	retval = retval && (Math.max(_edge.pt0.x, Math.max(_edge.pt1.x, _edge.pt2.x)) >= _x);
+	return retval;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+// addEdgeToDrawingPath(_edge, _path, _bezPath)
+//
+// _edge is the new set of edges
+// _path is the applied brush's paths that we're assembling
+// _bezpath is the pencil stroke we're applying the brush to
+/////////////////////////////////////////////////////////////////////////////////////
+
+addEdgeToDrawingPath = function(_edge, _path, _bezPath)
+{
+	var subdivision_level = 0;
+	var thisEdge = _edge;
+	var thisBez = new Bezier(thisEdge.pt0, thisEdge.pt1, thisEdge.pt2, thisEdge.fill);
+
+	var newVerts = [0]; // Start off with the first vertex in the edge
+	var vertCorner = [false];
+	var newIntercepts;
+	
+	var n;
+	var m;
+	
+	// Add vertices wherever there's a vertex in the path of the brushstroke
+	for(n = 0; n < _bezPath.startLength.length; n++)
+	{
+		var brushX = _bezPath.getBrushXFromStrokeX(_bezPath.startLength[n]) ;
+		//debugTrace("----------------------------------------------------------\ntesting for edge intersection with local x = " + brushX);
+		if(boundsIntersectX(thisEdge, brushX))
+		{
+			newIntercepts = thisBez.getXIntercepts(brushX);
+
+			for(m = 0; m < newIntercepts.length; m++)
+			{
+				// Make sure each new intercept is within the acceptable range, not too close to 0 or 1
+				if(newIntercepts[m] > VERTEX_ADDITION_PRECISION_THRESHOLD && newIntercepts[m] < 1 - VERTEX_ADDITION_PRECISION_THRESHOLD)
+				{
+					//debugTrace("------------------------------------found intercept at x = " + newIntercepts[m]);
+					newVerts.push(newIntercepts[m]);
+				}
+				//else 
+				//	//debugTrace("Leaving out a vertex because it's too close to 0 or 1: " + newIntercepts[m]);
+			}
+
+			var cornerNum;
+
+			// Figure out if this vertex represents a corner
+			if(n > 0 && n < _bezPath.startLength.length - 1)
+			{
+				//debugTrace("vertex #" + n + " of " + _bezPath.startLength.length);
+				var thisTanX = _bezPath.beziers[n].pointA.x   - _bezPath.beziers[n].pointB.x;
+				var thisTanY = _bezPath.beziers[n].pointA.y   - _bezPath.beziers[n].pointB.y;
+				var prevTanX = _bezPath.beziers[n-1].pointB.x - _bezPath.beziers[n-1].pointC.x;
+				var prevTanY = _bezPath.beziers[n-1].pointB.y - _bezPath.beziers[n-1].pointC.y;
+
+				if(thisTanX !== 0)
+				{
+					// tangent has nonzero x
+					// If the previous tangent _does_ have zero x, it must be a corner
+					if(prevTanX === 0)
+					{
+						//debugTrace("corner a");
+						cornerNum = n;
+					}
+					else if((prevTanY === 0 && ((prevTanX < 0 && thisTanX < 0) || 
+											   (prevTanX > 0 && thisTanX > 0)   )) ||
+							(prevTanY !== 0 && prevTanY / prevTanX == thisTanY / thisTanX))
+					{
+						// Previous tangent and current tangent have the same slope, so it's not a corner
+						//debugTrace("corner b");
+						cornerNum = NOT_A_CORNER;
+					}
+					else // not the same tangent on the two sides of the vertex, so mark it as a corner
+					{
+						//debugTrace("corner c");
+						cornerNum = n;
+					}
+				}
+				else // tangent's delta x is zero
+				{
+					// In Flash there's no such thing as a tangent that has x=0 and y=0, so we can assume y!=0
+					// If the previous tangent has nonzero x, it must be a corner
+					if(prevTanX !== 0)
+					{
+						//debugTrace("corner d");
+						cornerNum = n;
+					}
+					else if((prevTanY < 0 && thisTanY < 0) || (prevTanY > 0 && thisTanY > 0))
+					{
+						// Previous tangent and current tangent have the same slope, so it's not a corner
+						//debugTrace("corner e");
+						cornerNum = NOT_A_CORNER;
+					}
+					else // not the same tangent on the two sides of the vertex, so mark it as a corner
+					{
+						//debugTrace("corner f");
+						cornerNum = n;
+					}
+				}
+			}
+			else // It's an endpoint of the stroke path, so it's not a corner
+			{
+				//debugTrace("not a corner: n = " + n);
+				cornerNum = NOT_A_CORNER;
+			}
+
+			// Push a boolean value of whether this vertex is a corner for all intercepts
+			while(vertCorner.length < newVerts.length)
+				vertCorner.push(cornerNum);
+			
+		}
+		
+		// Now check for the 3-slice boundary intersection and add vertices there
+		
+		newIntercepts = [];
+		//debugTrace("brush expansion bounds: " + _bezPath.brushExpansionLeft + ", " + _bezPath.brushExpansionRight)
+		if(boundsIntersectX(thisEdge, _bezPath.brushExpansionLeft))
+			newIntercepts = thisBez.getXIntercepts(_bezPath.brushExpansionLeft);
+		if(boundsIntersectX(thisEdge, _bezPath.brushExpansionRight))
+			newIntercepts = newIntercepts.concat(thisBez.getXIntercepts(_bezPath.brushExpansionRight));
+
+		//debugTrace("Found " + newIntercepts.length + " expansion bounds intercepts");
+		
+		for(m = 0; m < newIntercepts.length; m++)
+		{
+			// Make sure each new intercept is within the acceptable range, not too close to 0 or 1
+			if(newIntercepts[m] > VERTEX_ADDITION_PRECISION_THRESHOLD && newIntercepts[m] < 1 - VERTEX_ADDITION_PRECISION_THRESHOLD)
+			{
+				//debugTrace("------------------------------------found boundary intercept at x = " + newIntercepts[m]);
+				newVerts.push(newIntercepts[m]);
+				vertCorner.push(NOT_A_CORNER);
+			}
+		}
+	}
+	newVerts.sort(function(a,b){ return a - b; });
+	newVerts.push(1); // Finish off with the endpoint, t = 1
+	vertCorner.push(NOT_A_CORNER);
+
+	if(vertCorner.length != newVerts.length)
+		fl.trace("Zerp! vertCorners = " + vertCorner.length + ", newVerts = " + newVerts.length);
+
+	subdivision_level = 0;
+
+	for(n = 0; n < newVerts.length - 1; n++)
+	{
+		this.mapEdgeSection(thisBez, _bezPath, _path, newVerts[n], newVerts[n + 1], vertCorner[n], vertCorner[n + 1], subdivision_level);
+	}
+	var subDivDebugMsg = "Edge subdivisions: ";
+	for(n = 0; n < newVerts.length; n++)
+		subDivDebugMsg += "" + newVerts[n] + ", ";
+	//debugTrace(subDivDebugMsg);
+	//debugTrace("Final subdivision level: " + subdivision_level);
+	
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+// mapEdgeSection (thisBez, _bezPath, _path, v1Idx, v2Idx, v1Corner, v2Corner, subdivision_level)
+//
+// maps a section of thisBez onto _bezPath in the _path object. The section endpoints
+// are defined by parameters to thisBez passed in v1Idx and v2Idx. v1Corner & v2Corner 
+// are indices of vertices at v1Idx and v2Idx if they correspond to bezier corners. subdivision_level is a 
+// variable to keep track of recursion levels, incremented at each level of recursion. 
+// This function is a helper for addEdgeToDrawingPath() above.
+/////////////////////////////////////////////////////////////////////////////////////
+
+mapEdgeSection = function(thisBez, _bezPath, _path, v1Idx, v2Idx, v1Corner, v2Corner, subdivision_level)
+{
+	//debugTrace("edge from t = " + newVerts[n] + " to t = " + newVerts[n + 1]);
+
+	var pt0 = thisBez.getPointNatural(v1Idx);
+	var pt0a = {x: pt0.x, y: pt0.y};
+	var pt2 = thisBez.getPointNatural(v2Idx);
+	var tan0 = thisBez.getTangentVector(v1Idx);
+	var tan0a = {x: tan0.x, y: tan0.y};
+	var tan2 = thisBez.getTangentVector(v2Idx);
+	var tempPt1;
+	tan2.x = -tan2.x;
+	tan2.y = -tan2.y;
+
+	// Get the get the intersection between the two tangents
+	var pt1 = getIntersectionPoint(pt0, tan0, pt2, tan2, false);
+	if(pt1 == INTERSECTION_PARALLEL)
+	{
+		//debugTrace("INTERSECTION is PARALLEL");
+		// Must be a straight line.  Put pt1 right in the middle
+		pt1 = {x: (pt0.x + pt2.x) / 2, y: (pt0.y + pt2.y) / 2};
+	}
+
+	//debugTrace("tangent is " + tan0.x + ", " + tan0.y);
+
+	var leftToRight0 = pt0.x < pt1.x;
+	var leftToRight2 = pt1.x > pt2.x;
+
+	var endPointDist = getDist(pt0, pt2);
+	var tan0Proportion = getDist(pt0, pt1) / endPointDist;
+	var tan2Proportion = getDist(pt2, pt1) / endPointDist;
+
+	// Transform the brush points and tangents onto the stroke
+	//debugTrace("------------------------------ point coordinates in brush")
+	//debugTrace("pt0  = " + pt0.x + ", " + pt0.y);
+	//debugTrace("tan0 = " + tan0.x + ", " + tan0.y);
+	//debugTrace("pt2  = " + pt2.x + ", " + pt2.y);
+	//debugTrace("tan2 = " + tan2.x + ", " + tan2.y);
+	var clipped0 = _bezPath.getBrushPointAndVector(pt0, tan0, leftToRight0);
+	var clipped2 = _bezPath.getBrushPointAndVector(pt2, tan2, leftToRight2);
+	//debugTrace("------------------------------ point coordinates in stroke")
+	//debugTrace("pt0  = " + pt0.x + ", " + pt0.y);
+	//debugTrace("tan0 = " + tan0.x + ", " + tan0.y);
+	//debugTrace("pt2  = " + pt2.x + ", " + pt2.y);
+	//debugTrace("tan2 = " + tan2.x + ", " + tan2.y);
+	//debugTrace("------------------------------ point coordinates end")
+
+	//debugTrace("tangent is " + tan0.x + ", " + tan0.y);
+	if(v1Corner != NOT_A_CORNER)
+	{
+		if(CORNER_STYLE == CORNER_CUT)
+		{
+			_bezPath.getBrushPointAndVector(pt0a, tan0a, !leftToRight0);
+			//debugTrace("Making a cut corner: (" + pt0a.x + ", " + pt0a.y + ")");
+			//debugTrace(" 			           (" + ((pt0.x + pt0a.x) / 2.0) + ", " + ((pt0.y + pt0a.y) / 2.0) + ")");
+			//debugTrace(" 			           (" + pt0.x + ", " + pt0.y + ")");
+			// Add a line straight across the corner
+			_path.addCurve(pt0a.x, pt0a.y, (pt0.x + pt0a.x) / 2.0, (pt0.y + pt0a.y) / 2.0, pt0.x, pt0.y);
+		}
+	}
+
+	// Now I need to find the intersection of the two tangents -- that'll be pt1
+	// if both endpoints were clipped then just make it a straight line
+	if(clipped0 && clipped2)
+	{
+		//debugTrace("both endpoints were clipped")
+		tempPt1 = {x: (pt0.x + pt2.x) / 2, y: (pt0.y + pt2.y) / 2};
+	}
+	else
+		tempPt1 = getIntersectionPoint(pt0, tan0, pt2, tan2);
+	//debugTrace("INTERSECTION_PARALLEL = " + (tempPt1 == INTERSECTION_PARALLEL));
+	//debugTrace("INTERSECTION_OUTSIDE = " + (tempPt1 == INTERSECTION_OUTSIDE));
+	//debugTrace("(leftToRight0 == leftToRight2) = " + (leftToRight0 == leftToRight2));
+
+	if(tempPt1 == INTERSECTION_OUTSIDE /*|| (leftToRight0 == leftToRight2 && tempPt1 != INTERSECTION_PARALLEL)*/)
+	{
+		// Try and correct any clipped points by shifting the tangent of the clipped 
+		// point to aim along the corner bisector
+		if(clipped0 || clipped2)
+		{
+			if(clipped0)
+			{
+				var angle2To0 = Math.atan2(pt0.x - pt2.x, pt0.y - pt2.y);
+				var angleTan2FromPt0 = Math.atan2(tan2.x, tan2.y) - angle2To0;
+				var angleTan0 = angle2To0 + Math.PI - angleTan2FromPt0;
+				tan0 = {x: Math.sin(angleTan0), y: Math.cos(angleTan0)};
+				
+			}
+			if(clipped2)
+			{	
+				var angle0To2 = Math.atan2(pt2.x - pt0.x, pt2.y - pt0.y);
+				var angleTan0FromPt2 = Math.atan2(tan0.x, tan0.y) - angle0To2;
+				var angleTan2 = angle0To2 + Math.PI - angleTan0FromPt2;
+				tan0 = {x: Math.sin(angleTan2), y: Math.cos(angleTan2)};
+			}
+			tempPt1 = getIntersectionPoint(pt0, tan0, pt2, tan2);
+			//debugTrace("tempPt1 = " + tempPt1);
+		}	
+	}
+	
+	if(tempPt1 == INTERSECTION_OUTSIDE)
+	{
+		if(subdivision_level < MAX_EDGE_SUBDIVISION)
+		{
+			// Try subdividing and adding a vertex
+			// Insert a new vertex in the original edge to adaptively slice it and try again until the problem is solved
+			var newVertIdx = (v1Idx + v2Idx) / 2.0;
+			
+			//debugTrace("Subdividing the edge at subdivision level " + subdivision_level);
+			mapEdgeSection(thisBez, _bezPath, _path, v1Idx, newVertIdx, v1Corner, false, subdivision_level + 1)
+			mapEdgeSection(thisBez, _bezPath, _path, newVertIdx, v2Idx, false, v2Corner, subdivision_level + 1)
+			return;
+		}
+		else
+		{
+			if(USE_CUBIC_SUBDIVISION)
+			{
+				//debugTrace("reached max edge subdivision limit on INTERSECTION_OUTSIDE");
+
+				// the tangent rays didn't intersect, so instead we'll go nuclear with a cubic edge
+
+				// First set the tangents to be a good length
+				//endPointDist = thisBez.getSegmentLengthNatural(v1Idx, v2Idx);
+				endPointDist = getDist(pt0, pt2);
+				var tan0Len = tan0Proportion * endPointDist;
+				var tan2Len = tan2Proportion * endPointDist;
+				//debugTrace("Cubic nuke -- distance between endpoints: " + endPointDist);
+				//debugTrace("Cubic nuke -- tan0Len: " + tan0Len);
+				//debugTrace("Cubic nuke -- tan2Len: " + tan2Len);
+				//debugTrace("Cubic nuke -- tan0Proportion: " + tan0Proportion);
+				//debugTrace("Cubic nuke -- tan2Proportion: " + tan2Proportion);
+				//debugTrace("Cubic nuke -- tan0 before normalization: " + tan0.x + ", " + tan0.y);
+				//debugTrace("Cubic nuke -- tan2 before normalization: " + tan2.x + ", " + tan2.y);
+				tan0 = normalizeVector(tan0);
+				tan2 = normalizeVector(tan2);
+				//debugTrace("Cubic nuke -- tan0 after normalization: " + tan0.x + ", " + tan0.y);
+				//debugTrace("Cubic nuke -- tan2 after normalization: " + tan2.x + ", " + tan2.y);
+				tan0.x *= tan0Len;
+				tan0.y *= tan0Len;
+				tan2.x *= tan2Len;
+				tan2.y *= tan2Len;
+				//debugTrace("Cubic nuke -- tan0 after scaling: " + tan0.x + ", " + tan0.y);
+				//debugTrace("Cubic nuke -- tan2 after scaling: " + tan2.x + ", " + tan2.y);
+
+				//debugTrace("INTERSECTION_OUTSIDE. Trying a cubic edge");
+				addCubicEdgeToDrawingPath(pt0, tan0, pt2, tan2, _path);
+
+				// Draw the tangent vectors
+				//debugDrawLine(pt0.x, pt0.y, pt0.x + tan0.x, pt0.y + tan0.y);
+				//debugDrawLine(pt2.x, pt2.y, pt2.x + tan2.x, pt2.y + tan2.y);
+
+				return;
+
+			}
+			else
+			{
+				// just do a straight line
+				
+				pt1.x = (pt0.x + pt2.x) / 2.0;
+				pt1.y = (pt0.y + pt2.y) / 2.0;
+				//pt1 = _bezPath.getBrushPoint(pt1);
+			}
+		}
+	}
+	else if(tempPt1 == INTERSECTION_PARALLEL)
+	{
+		// The two vectors were parallel (probably the three control points 
+		// are colinear), so just transform pt1 normally
+		pt1 = _bezPath.getBrushPoint(pt1);
+	}
+	else 
+	{
+		//debugTrace("intersection point is " + tempPt1.x + ", " + tempPt1.y);
+		pt1 = tempPt1;
+	}
+
+	//debugTrace("addEdgeToDrawingPath: adding path");
+	//debugTrace("(" + pt0.x + ", " + pt0.y + ")");
+	//debugTrace("(" + pt1.x + ", " + pt1.y + ")");
+	//debugTrace("(" + pt2.x + ", " + pt2.y + ")");
+
+	if(pt1 !== undefined)
+	{
+		_path.addCurve(pt0.x, pt0.y, 
+					   pt1.x, pt1.y, 
+					   pt2.x, pt2.y);
+		
+		// Draw debug lines between the control points
+		//debugDrawLine(pt0.x, pt0.y, pt1.x, pt1.y);
+		//debugDrawLine(pt2.x, pt2.y, pt1.x, pt1.y);
+
+	}
+	
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+
+addCubicEdgeToDrawingPath = function(pt0, tan0, pt3, tan3, _path)
+{
+	var pt1 = {};
+	var pt2 = {};
+	var tanMultiplier = 0.66666;
+	
+	pt1.x = pt0.x + tan0.x * tanMultiplier;
+	pt1.y = pt0.y + tan0.y * tanMultiplier;
+	pt2.x = pt3.x + tan3.x * tanMultiplier;
+	pt2.y = pt3.y + tan3.y * tanMultiplier;
+	
+	//debugTrace("addCubicEdgeToDrawingPath: adding path");
+	//debugTrace("(" + pt0.x + ", " + pt0.y + ")");
+	//debugTrace("(" + pt1.x + ", " + pt1.y + ")");
+	//debugTrace("(" + pt2.x + ", " + pt2.y + ")");
+	//debugTrace("(" + pt3.x + ", " + pt3.y + ")");
+	
+	_path.addCubicCurve(pt0.x, pt0.y, 
+					    pt1.x, pt1.y, 
+					    pt2.x, pt2.y,
+					    pt3.x, pt3.y);
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+// mapShapeToPath(shape)
+//
+// Draws the shape along the selected path as an art brush
+/////////////////////////////////////////////////////////////////////////////////////
+
+mapShapeToPath = function(brushShape, bezPath, recolor, previousFill, progBarX, progBarY)
+{	
+	//debugTrace("mapShapeToPath. recolor = " + recolor);
+	//debugTrace("mapShapeToPath. Shape translation = ");
+	//debugTrace("x = " + brushShape.tansformX + ", y = " + brushShape.tansformY);
+	var currentEdgeNum;
+	var firstEdgeNum;
+	var originalFill = doc.getCustomFill("toolbar");
+	var fill;
+	var stroke;
+	var thisEdge;
+
+	// Set the fill and stroke for the new tweened shape
+	var old_fill = doc.getCustomFill("toolbar");  
+	var old_stroke = doc.getCustomStroke("toolbar");
+
+	// Create the progress bar
+	var progPoint = apply_transform(fl.getDocumentDOM().viewMatrix, {x: progBarX, y: progBarX});
+	//debugTrace("prog bar point: " + progPoint.x + ", " + progPoint.y);
+	var prog = new ProgBar(progPoint.x, progPoint.y);
+
+	var numEdges = brushShape.edges.length;
+	var progress = 0;
+
+	var drawPath = fl.drawingLayer.newPath();
+
+	//debugTrace("brush has " + numEdges + " edges");
+	//debugTrace("brush has " + brushShape.contours.length + " contours");
+
+	for(var n = 0; n <  brushShape.contours.length; n++)
+	{
+		if(brushShape.contours[n].interior)
+		{
+			var newEdges;
+
+			//debugTrace("interior edge");
+			drawPath.newContour();
+			//debugTrace("new contour'd");
+			newEdges = getContourEdgeOrder(brushShape.contours[n]);
+			//debugTrace("got contour edge order");
+			for(var m = 0; m < newEdges.length; m++)
+			{
+				//debugTrace("adding edge " + m + " of " + newEdges.length);
+				addEdgeToDrawingPath(newEdges[m], drawPath, bezPath);
+				if(progress++ % 10 === 0)
+					prog.setProgress(progress / (numEdges * 2));
+			}
+
+			fill = brushShape.contours[n].fill;
+			//debugTrace("Recolor is " + recolor);
+			//debugTrace("previousFill is " + previousFill);
+
+			if(recolor == RECOLOR_USE_PREVIOUS && previousFill && fill.style != "noFill")
+			{
+				//debugTrace("using previous color");
+				fill = previousFill;
+			}			
+			if(!fill || (recolor == RECOLOR_YES && fill.style != "noFill"))
+			{
+				//debugTrace("sticking with the original fill");
+				fill = originalFill; // toolbar fill
+			}
+			else if(recolor == RECOLOR_USE_LINE && fill.style != "noFill")
+			{
+				//debugTrace("getting fill from index");
+				fill = bezPath.getFillFromIndex(0);
+				//debugTrace("fill is " + fill);
+			}
+
+			if(fill.style == "noFill")
+			{
+				// Creating a brushShape with "noFill" will leave the inside area unchanged, but we want it
+				// to be transparent.  So let's fake it with a fully transparent color.
+				// Maybe later we'll come back and delete all the transparent fills
+
+				//debugTrace("Found an empty fill.  orientation = " + brushShape.contours[n].orientation);
+
+				fill = {style: "solid", color: DUMMY_TRANSPARENCY};  // Alpha 0, any color but black (for some reason #00000000 won't work)
+			}
+
+			doc.setCustomFill(fill);
+
+			//debugTrace("Drawing the filled brushShape");
+			//debugTrace("      color = " + fill.color);
+			//debugTrace("Actual color = " + doc.getCustomFill("toolbar").color);
+
+			// draw the brushShape without a stroke
+			//debugTrace("drawing the brush");
+			drawPath.makeShape(false, true);
+			drawPath = fl.drawingLayer.newPath();
+		}
+	}
+
+
+	if(getFlashVersion() >= FLASH_CS4)  // Only do strokes if we're in Flash CS4 or higher
+	{
+		for(n = 0; n < numEdges; n++)
+		{
+			if(brushShape.edges[n].stroke.style != "noStroke")
+			{
+				var thickness = 1;
+				if(brushShape.edges[n].stroke)
+					thickness = brushShape.edges[n].stroke.thickness;
+				//debugTrace("thickness of edge 3: " + thickness);
+				thisEdge = {pt0: brushShape.edges[n].getControl(0), 
+								pt1: brushShape.edges[n].getControl(1), 
+								pt2: brushShape.edges[n].getControl(2),
+								thickness: thickness};
+				addEdgeToDrawingPath(thisEdge, drawPath, bezPath);
+
+				drawPath.newContour();
+				if(recolor == RECOLOR_NO)
+				{
+					stroke = brushShape.edges[n].stroke;
+					if(stroke !== undefined)
+						doc.setCustomStroke(stroke);
+					// draw the curve
+					drawPath.makeShape(true, false);
+					drawPath = fl.drawingLayer.newPath();
+				}			
+			}
+			if(progress++ % 10 === 0)
+				prog.setProgress(progress / (numEdges * 2));
+		}
+	}
+
+	if(recolor == RECOLOR_YES)
+	{
+		// Draw all the edges at once
+		drawPath.makeShape(true, false);		
+	}
+
+	// Restore the original fill and stroke
+	doc.setCustomFill(old_fill);
+	doc.setCustomStroke(old_stroke);
+
+	prog.end();
+
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Get a unique brush name based on the name of the brush symbol
+///////////////////////////////////////////////////////////////////////////
+
+getUniqueBrushStrokeName = function(brushSymbol)
+{
+	if(!doc.library.itemExists(BRUSH_STROKE_LIBRARY_PATH))
+		doc.library.addNewItem("folder", BRUSH_STROKE_LIBRARY_PATH);
+	var strokeBaseName = BRUSH_STROKE_NAME_PREFIX; // + brushSymbol.name + "_";
+
+	var current_name_count = parseInt(doc.getDataFromDocument(ID_BRUSH_STROKE_COUNT));
+
+	var current_name_count_string = "" + current_name_count;          // convert to a string
+	while(current_name_count_string.length < BRUSH_STROKE_NAME_COUNT_PADDING)
+		current_name_count_string = "0" + current_name_count_string;
+
+	// Increment the name count until we find one that hasn't been taken yet
+	var itemFullPath = BRUSH_STROKE_LIBRARY_PATH + "/" + strokeBaseName + current_name_count_string;
+	var itemName = strokeBaseName + getStrokeNameBase() + current_name_count_string;
+	//debugTrace("testing for " + itemFullPath);
+	while(doc.library.itemExists(itemFullPath))
+	{
+		//debugTrace("library item exists: " + itemFullPath);
+
+		current_name_count++;
+		current_name_count_string = "" + current_name_count;                       // add 1 and convert to a string
+		while(current_name_count_string.length < BRUSH_STROKE_NAME_COUNT_PADDING)  // pad with zeroes if needed
+			current_name_count_string = "0" + current_name_count_string;
+
+		itemFullPath = BRUSH_STROKE_LIBRARY_PATH + "/" + strokeBaseName + current_name_count_string;
+		itemName = strokeBaseName + current_name_count_string;
+		//debugTrace("testing for " + itemFullPath);
+	}
+	doc.addDataToDocument(ID_BRUSH_STROKE_COUNT, "string", "" + (current_name_count + 1))
+	return itemName;
+}
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+mapShapeToPathOnLayer = function(brushShape, boundsElement, expansionBoundsElement, _path, layerNum, recolor, direction, previousFill)
+{
+	var path = _path;
+	var thisTimeline = doc.getTimeline();
+	var thisDirection;
+
+	var orderedEdges;
+
+	while(path.isGroup || path.isDrawingObject)
+	{
+		doc.selectNone();
+		doc.selection = [path];
+		doc.breakApart();
+		path = doc.selection[0];
+	}
+	doc.selectNone();
+
+	//debugTrace("shape " + i + " has " + doc.selection[i].edges.length + " edges");
+	if(path !== undefined && path.elementType == "shape" && path.edges.length)
+	{
+		orderedEdges = getEdgeOrderQuad(path.edges);
+
+		/*
+		// This is a failed attempt at dealing with shapes that still have a transformation matrix
+
+		var brushMatrix = brushShape.matrix;
+
+		//debugTrace("brush shape matrix: ");
+		//debugTrace(matrix2String(brushMatrix));
+
+		if(!direction)
+		{
+			brushMatrix = fl.Math.invertMatrix(brushShape.matrix); // Invert the matrix when direction is reversed
+			//debugTrace("inverted brush shape matrix: ");
+			//debugTrace(matrix2String(brushMatrix));
+		}
+
+		orderedEdges = transformEdges(brushMatrix, orderedEdges);  // Apply the brush shape's transform matrix to the edges to get their actual position
+		*/
+
+		//debugTrace("shape has " + path.edges.length + " edges");
+
+		// Draw the shape
+
+		doc.selectNone();
+		// Make sure we're on the correct layer.
+		thisTimeline.currentLayer = layerNum;
+		//debugTrace("creating bezier " + orderedEdges.length + " paths");
+		for(var n = 0; n < orderedEdges.length; n++)
+		{
+			var deltaX, deltaY;
+			deltaX = orderedEdges[n][orderedEdges[n].length - 1].pt2.x - orderedEdges[n][0].pt0.x;
+			deltaY = orderedEdges[n][orderedEdges[n].length - 1].pt2.y - orderedEdges[n][0].pt0.y;
+			if(deltaX + deltaY > 0)
+			{
+				//debugTrace("flipping direction to make it UL -> LR");
+				thisDirection = !direction;
+			}
+			else thisDirection = direction;
+			var bezPath = new CompoundBezier(orderedEdges[n], thisDirection);
+			//debugTrace("1 created bezier path");
+			bezPath.setBrushBounds(boundsElement);
+			bezPath.setBrushExpansionBounds(expansionBoundsElement);
+			//debugTrace("2 set brush bounds");
+			mapShapeToPath(brushShape, bezPath, recolor, previousFill, path.x, path.y);
+			//debugTrace("3 mapped to path");
+
+			// Convert the new brush stroke art into a drawing object
+			doc.selectNone();
+			thisTimeline = doc.getTimeline();
+			doc.selection = thisTimeline.layers[layerNum].frames[thisTimeline.currentFrame].elements;
+			if(doc.selection.length)
+				doc.union();
+			doc.selectNone();
+			//break;
+		}
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+convertToStrokeSymbol = function(brushSymbol)
+{
+	var newStrokeName = getUniqueBrushStrokeName(brushSymbol);
+	var tempStrokeName = newStrokeName;
+	while(doc.library.itemExists(tempStrokeName))
+		tempStrokeName += "0";
+	doc.convertToSymbol(BRUSH_STROKE_SYMBOL_TYPE, getUniqueBrushStrokeName(brushSymbol), BRUSH_STROKE_SYMBOL_REGISTRATION);
+	doc.library.moveToFolder(BRUSH_STROKE_LIBRARY_PATH);
+	doc.library.renameItem(newStrokeName);
+}
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+isBrushStrokeSymbol = function(strokeSymbol)
+{
+	var theseLayers = strokeSymbol.timeline.layers;
+	if(theseLayers.length == 2 &&
+	   theseLayers[0].name == BRUSH_STROKE_LAYER_NAME &&
+	   theseLayers[1].name == PATH_LAYER_NAME &&
+	   (theseLayers[0].frames[0].elements.length === 0 || theseLayers[0].frames[0].elements[0].elementType == "shape") &&
+	   theseLayers[1].frames[0].elements.length &&
+	   theseLayers[1].frames[0].elements[0].elementType == "shape" &&
+	   theseLayers[1].layerType == "guide")
+	{
+		return true;
+	}
+	else return false;
+}
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+getElementFill = function(el)
+{
+	var n;
+	for(n = 0; n < el.contours.length; n++)
+	{
+		if(el.contours[n].fill.color && el.contours[n].fill.color != DUMMY_TRANSPARENCY)
+			return el.contours[n].fill;
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+mapShapeToPathInThisSymbol = function(brushShape, boundsElement, expansionBoundsElement, brushName, strokeSymbol, _recolor, _direction, reverseOnReapply)
+{
+	var direction = _direction;
+	// Only do this if the second layer has a shape on it (the stroke path)
+	if(doc.getTimeline().layers[1].frames[0].elements.length && doc.getTimeline().layers[1].frames[0].elements[0].elementType == "shape")
+	{
+		//debugTrace("1 Number of elements on path layer: " + doc.getTimeline().layers[1].frames[0].elements.length);
+
+		var previousFill = null;  // the fill used on a previous application of the brush tool
+
+		if(reverseOnReapply === undefined)
+			reverseOnReapply = true;
+
+		// Doesn't work properly if Flash is in object drawing mode
+		var objectDrawingMode = fl.objectDrawingMode;
+		fl.objectDrawingMode = false;
+
+		doc.selectNone();
+		//debugTrace("2 Number of elements on path layer: " + doc.getTimeline().layers[1].frames[0].elements.length);
+
+		// Set the layers to their appropriate states for a brush stroke symbol
+		doc.getTimeline().layers[0].visible = true;
+		doc.getTimeline().layers[0].locked = false;
+		doc.getTimeline().layers[0].layerType = "normal";
+		doc.getTimeline().layers[1].visible = true;
+		doc.getTimeline().layers[1].locked = false;
+
+		//debugTrace("3 Number of elements on path layer: " + doc.getTimeline().layers[1].frames[0].elements.length);
+
+		// First save the fill of the existing brush stroke in case we need it later
+		if(doc.getTimeline().layers[0].frames[0].elements.length &&
+		   doc.getTimeline().layers[0].frames[0].elements[0].elementType == "shape" && 
+		   doc.getTimeline().layers[0].frames[0].elements[0].contours.length &&
+		   _recolor == RECOLOR_USE_PREVIOUS)
+		{
+			//debugTrace("saving previous fill");
+			previousFill = getElementFill(doc.getTimeline().layers[0].frames[0].elements[0])
+			//debugTrace("previous fill color = " + previousFill.color);
+		}	
+
+		//debugTrace("3.5 Number of elements on path layer: " + doc.getTimeline().layers[1].frames[0].elements.length);
+
+		// delete the existing brush stroke
+		doc.selectNone();
+		//debugTrace("3.6 Number of elements on path layer: " + doc.getTimeline().layers[1].frames[0].elements.length);
+		doc.selection = doc.getTimeline().layers[0].frames[0].elements;
+		//debugTrace("3.7 Number of elements on path layer: " + doc.getTimeline().layers[1].frames[0].elements.length);
+		if(doc.selection.length)
+			doc.deleteSelection();
+
+		//debugTrace("4 Number of elements on path layer: " + doc.getTimeline().layers[1].frames[0].elements.length);
+
+		// Get the symbol's metadata to figure out what direction we're going to apply the stroke
+		if(strokeSymbol.hasData(ID_BRUSH_STROKE_SOURCE))
+		{
+			//debugTrace("replacing old brush stroke: " + strokeSymbol.getData(ID_BRUSH_STROKE_SOURCE));
+			//debugTrace("                      with: " + brushName);
+			//debugTrace("old brush stroke direction: " + strokeSymbol.getData(ID_BRUSH_STROKE_DIRECTION));
+			if(direction === undefined)
+			{
+				//debugTrace("current direction is undefined");
+				if(strokeSymbol.getData(ID_BRUSH_STROKE_SOURCE).toLowerCase() == brushName.toLowerCase())
+				{
+					// same brush as previously applied brush stroke
+					// Since direction wasn't specified, we just want to reverse the direction of the previous stroke
+					//debugTrace("previous direction was " + strokeSymbol.getData(ID_BRUSH_STROKE_DIRECTION));
+					if(strokeSymbol.getData(ID_BRUSH_STROKE_DIRECTION) == STROKE_DIRECTION_REVERSE)
+						direction = true;
+					else direction = false;
+
+					// ... unless reverseOnReapply is false
+					if(!reverseOnReapply)
+						direction = !direction;
+				}
+				else if(strokeSymbol.getData(ID_BRUSH_STROKE_DIRECTION) == STROKE_DIRECTION_REVERSE)
+				{
+					// the previous brush stroke was reversed, so make the new one reversed too.
+					direction = false;
+				}
+				else
+				{
+					// the previous brush stroke was forward, so make the new one forward too.
+					direction = true;
+				}
+			}
+		}
+		//debugTrace("new direction is " + direction);
+
+		//debugTrace("5 Number of elements on path layer: " + doc.getTimeline().layers[1].frames[0].elements.length);
+		doc.selectNone();
+		// Select the path
+		doc.selection = doc.getTimeline().layers[1].frames[0].elements;
+		//debugTrace("selection length: " + doc.selection.length);
+
+		var recolor = _recolor;
+		if(recolor == RECOLOR_USE_PREVIOUS)
+		{
+			if(!strokeSymbol.hasData(ID_BRUSH_STROKE_RECOLOR) || strokeSymbol.getData(ID_BRUSH_STROKE_RECOLOR) == STROKE_RECOLOR_NO)
+				recolor = RECOLOR_NO;
+			else if(strokeSymbol.getData(ID_BRUSH_STROKE_RECOLOR) == STROKE_RECOLOR_USE_LINE)
+			{
+				recolor = RECOLOR_USE_LINE;
+			}
+		}
+
+		// Apply the brush
+		mapShapeToPathOnLayer(brushShape, boundsElement, expansionBoundsElement, doc.selection[0], 0, recolor, direction, previousFill);
+
+		// Set the line layer to be invisible
+		doc.getTimeline().layers[1].visible = LINE_LAYER_VISIBLE;
+
+		// Exit out back to the original timeline
+		doc.exitEditMode();
+
+		// Add data to the symbol to remember how the brush was applied
+		strokeSymbol.addData(ID_BRUSH_STROKE_DIRECTION, "string", direction ? STROKE_DIRECTION_FORWARD : STROKE_DIRECTION_REVERSE);
+		strokeSymbol.addData(ID_BRUSH_STROKE_SOURCE, "string", brushName);
+		if(_recolor == RECOLOR_NO)
+			strokeSymbol.addData(ID_BRUSH_STROKE_RECOLOR, "string", STROKE_RECOLOR_NO);
+		else if(_recolor == RECOLOR_YES)
+			strokeSymbol.addData(ID_BRUSH_STROKE_RECOLOR, "string", STROKE_RECOLOR_YES);
+		else if(_recolor == RECOLOR_USE_LINE)
+			strokeSymbol.addData(ID_BRUSH_STROKE_RECOLOR, "string", STROKE_RECOLOR_USE_LINE);
+
+		fl.objectDrawingMode = objectDrawingMode;
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Copies the raw shape data from layer 0, frame 0 of the item that's
+// currently selected in the library and maps it onto the selected path
+///////////////////////////////////////////////////////////////////////////
+
+mapSymbolToPath = function(_recolor, _direction, _brushSymbolName)
+{
+	//fl.outputPanel.clear();
+	//debugTrace("mapSymbolToPath() 1");
+	if(doc && doc.selection.length)
+	{
+		//debugTrace("mapSymbolToPath() 2");
+		var brushSymbol = null;
+
+		if(_brushSymbolName)
+		{
+			var brushItemIndex = doc.library.findItemIndex(_brushSymbolName);
+			//debugTrace("brush item index: " + brushItemIndex);
+			//debugTrace("brush item index type: " + typeof brushItemIndex);
+			//debugTrace("number type: " + typeof 5);
+			var n = 0;
+			//debugTrace("number type: " + typeof n);
+			// if the returned value is an array then the symbol name wasn't found
+			if(brushItemIndex.toString() !== "") 
+				brushSymbol = doc.library.items[brushItemIndex];
+			else
+				fl.trace("Error: brush name " + _brushSymbolName + " not found in library");
+		}
+		else if(doc.library.getSelectedItems().length)
+			brushSymbol = doc.library.getSelectedItems()[0];
+
+		if(brushSymbol == null)
+			alert("Please select a single item in the library");
+		else
+		{		
+			// Get the shape data from the selected library item
+			var brushShape = getBrushShape(brushSymbol);
+			var boundsElement = getBrushBounds(brushSymbol);
+			var expansionBoundsElement = getBrushExpansionBounds(brushSymbol);
+
+			if(brushShape == null)
+				fl.trace(BRUSH_HAS_NO_ART_WARNING);
+			else
+			{
+
+				//debugTrace("brush is in " + doc.library.getSelectedItems()[0].name);
+
+				var thisTimeline = null;		
+				var strokeSymbol = null;
+
+				// test, save, then deselect all the symbol instances
+				// then group all the shape elements, then symbolize each one
+				// then deal with all the symbols, saved and newly-created
+				// In each new symbol, break apart the grouped shape, 
+				// distribute to layers, and do some crazy symbol duplication
+				// to separate out the individual shapes
+
+				var finalSelection = [];  // this is the list of elements that should be selected at the end
+				var curSelection = doc.selection;
+				var oldStrokeSymbols = [];
+				var symbolsToDelete = [];
+				var sizeOfInitialSelection = curSelection.length;
+
+				//debugTrace("curSelection.length is " + curSelection.length);
+
+				// If more than one stroke is about to be applied, confirm that the 
+				// user really wants more than one stroke.
+				//debugTrace("confirming multiple strokes 1");				
+				if(sizeOfInitialSelection == 1 || (sizeOfInitialSelection > 1 && confirm(MULTI_STROKE_CONFIRM_MSG_1 + sizeOfInitialSelection + MULTI_STROKE_CONFIRM_MSG_2)))
+				{
+
+					var selNum = 0;
+					for(selNum = 0; selNum < curSelection.length; selNum++)
+					{
+						if(curSelection[selNum].elementType == "instance")
+						{
+							if(curSelection[selNum].symbolType == "graphic")
+							{
+								if(isBrushStrokeSymbol(curSelection[selNum].libraryItem))  
+								{
+									// This looks like it's a stroke symbol.
+									// Add this instance to the list of symbols we're going to re-stroke
+									oldStrokeSymbols.push(curSelection[selNum]);
+									finalSelection.push(curSelection[selNum]);
+								}
+							}
+							// Deselect this instance
+							curSelection[selNum].selected = false;
+						}
+					}
+
+					// Now all the elements in the selection should be shapes or groups.
+					// Group these elements to make them individually dealable-with so
+					// we can symbolize them and they'll stay in their own frame (in the
+					// case of multi-frame edit).
+					if(doc.selection.length)
+						doc.group();
+					curSelection = doc.selection;
+					var newStrokeSymbols = [];
+
+					for(selNum = 0; selNum < curSelection.length; selNum++)
+					{
+						// Select only this group
+						doc.selectNone();
+						doc.selection = [curSelection[selNum]];
+						// Convert the group to a symbol
+						convertToStrokeSymbol(brushSymbol);
+						// Add this newly created symbol to our list of new path symbols
+						newStrokeSymbols.push(doc.selection[0]);
+					}
+
+					// Now we have two lists of symbols to deal with. Deal with them.
+					var strokeNum;
+
+					// Deal with the new strokes first
+					for(strokeNum = 0; strokeNum < newStrokeSymbols.length; strokeNum++)
+					{
+						doc.selectNone();
+						doc.selection = [newStrokeSymbols[strokeNum]];
+						doc.enterEditMode("inPlace");
+						doc.selectAll();
+
+						// Ungroup the grouping we did in the previous step before we symbolized it
+						//debugTrace("ungroup");
+						doc.breakApart(); //this has more predictable behavior than ungroup()
+						doc.distributeToLayers();
+						
+						// Note: At some point they changed the behavior of distributeToLayers so it doesn't leave an empty layer
+						// So let's add one manually to ensure compatibility with subsequent code
+						doc.getTimeline().addNewLayer();
+
+						var pathLayers = doc.getTimeline().layers;
+
+						//debugTrace("num layers " + pathLayers.length);
+
+						//debugTrace("number of paths: " + (pathLayers.length - 1));					
+
+						if(pathLayers.length > 2)
+						{
+							var layerNum = 1;
+
+							//debugTrace("confirming multiple strokes 2");
+
+							// If there's more than one stroke about to be applied and we haven't 
+							// asked already, confirm that the user wants multiple strokes
+							if(sizeOfInitialSelection != 1 || confirm(MULTI_STROKE_CONFIRM_MSG_1 + (pathLayers.length - 1) + MULTI_STROKE_CONFIRM_MSG_2))
+							{
+								for(layerNum = 1; layerNum < pathLayers.length; layerNum++)
+								{
+									doc.selectNone();
+									doc.selection = [pathLayers[layerNum].frames[0].elements[0]];
+									convertToStrokeSymbol(brushSymbol);
+									doc.enterEditMode("inPlace");
+									doc.getTimeline().addNewLayer(BRUSH_STROKE_LAYER_NAME);
+									doc.getTimeline().layers[1].name = PATH_LAYER_NAME;
+									doc.getTimeline().layers[1].layerType = "guide";
+									doc.exitEditMode();
+								}
+
+								// There was more than one path, each of which we made into a symbol.
+								// That means the symbol we're in is just a temp that we should throw 
+								// away when we're done. Add it to our "to be deleted" array.
+								//debugTrace("planning to delete temp symbol " + newStrokeSymbols[strokeNum].libraryItem.name);
+								doc.exitEditMode();
+								doc.breakApart();
+
+								// Add these new symbols to the old stroke array so that they can be stroked all together
+								oldStrokeSymbols = oldStrokeSymbols.concat(doc.selection);
+							}
+							else
+							{
+								doc.exitEditMode();
+								doc.breakApart();
+							}
+
+							finalSelection = finalSelection.concat(doc.selection);
+							symbolsToDelete.push(newStrokeSymbols[strokeNum].libraryItem);
+						}
+						else
+						{
+							doc.getTimeline().layers[0].name = BRUSH_STROKE_LAYER_NAME;
+							doc.getTimeline().layers[1].name = PATH_LAYER_NAME;
+							doc.getTimeline().layers[1].layerType = "guide";
+							oldStrokeSymbols.push(newStrokeSymbols[strokeNum]);
+							doc.exitEditMode();
+						}
+
+					}
+
+					// Deal with all the stroke symbols.
+					for(strokeNum = 0; strokeNum < oldStrokeSymbols.length; strokeNum++)
+					{
+						strokeSymbol = oldStrokeSymbols[strokeNum].libraryItem;
+
+						if(strokeSymbol.name == brushSymbol.name)
+						{
+							fl.trace("Error: you can't apply a symbol to itself as an art brush");
+						}
+						else
+						{
+							//debugTrace("re-brushing an existing stroke, previously " + strokeSymbol.getData(ID_BRUSH_STROKE_SOURCE));
+
+							doc.selectNone();
+							doc.selection = [oldStrokeSymbols[strokeNum]];
+							doc.enterEditMode("inPlace");
+							mapShapeToPathInThisSymbol(brushShape, boundsElement, expansionBoundsElement, brushSymbol.name, strokeSymbol, _recolor, _direction, true);
+						}
+					}
+
+					doc.selectNone();
+					doc.selection = oldStrokeSymbols;
+				}
+
+				// Go through and delete all the temporary working symbols
+				for(var delNum = 0; delNum < symbolsToDelete.length; delNum++)
+				{
+					//debugTrace("deleting temp symbol: " + symbolsToDelete[delNum].name);
+					doc.library.deleteItem(symbolsToDelete[delNum].name);
+				}
+
+				doc.library.selectNone();
+				doc.library.selectItem(brushSymbol.name);
+			}
+		}
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+getStrokeSymbols = function()
+{
+	returnArray = [];
+	// return an array of all the stroke symbols (symbols in the stroke folder in the library)
+	if(doc.library.itemExists(BRUSH_STROKE_LIBRARY_PATH))
+	{
+		var items = doc.library.items;
+		for(var nItem = 0; nItem < items.length; nItem++)
+		{
+			// If the item name starts with BRUSH_STROKE_LIBRARY_PATH then it's in the brush folder
+			if(items[nItem].name.slice(0, BRUSH_STROKE_LIBRARY_PATH.length) == BRUSH_STROKE_LIBRARY_PATH)
+			{
+				var strokeSymbol = items[nItem];
+				// If the item has all the properties of a stroke symbol
+				if(strokeSymbol.hasData(ID_BRUSH_STROKE_SOURCE))
+				{
+					//debugTrace("pushing " + strokeSymbol.name + " into stroke symbol array");
+					returnArray.push(strokeSymbol);
+				}
+			}
+		}
+	}
+
+	return returnArray;
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+getStrokeNameBase = function()
+{
+	newNameBase = doc.name;
+
+	if(newNameBase.substring(0, UNTITLED_STRING.length) == UNTITLED_STRING && newNameBase.indexOf(NAME_SEPARATOR) == -1)
+		newNameBase = UNTITLED_SYMBOL_NAME + NAME_SEPARATOR;
+	else
+	{
+		newNameBase = newNameBase.slice(0,newNameBase.indexOf("."));
+		var name_tokens = newNameBase.split("_");
+		newNameBase = "";
+
+		for(var n = 0; n < name_tokens.length; n++)
+		{
+			newNameBase += name_tokens[n] + "_";
+		}
+	}
+
+	return newNameBase;
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+remapSymbolToStrokeSymbols = function()
+{
+	if(doc)
+	{
+		if(doc.library.getSelectedItems().length != 1)
+			alert("Please select a single item in the library");
+		else
+		{		
+			//debugTrace("remapping a brush globally");
+			var brushSymbol = doc.library.getSelectedItems()[0];
+			//debugTrace("remapping a brush globally 2");
+			// Get the shape data from the selected library item
+			var brushShape = getBrushShape(brushSymbol);
+			var boundsElement = getBrushBounds(brushSymbol);
+			var expansionBoundsElement = getBrushExpansionBounds(brushSymbol);
+
+			//debugTrace("remapping a brush globally 3");
+
+			if(brushShape == null)
+				fl.trace(BRUSH_HAS_NO_ART_WARNING);
+			else
+			{
+				var editStack = save_edit_place();
+
+				// For each stroke symbol x, if x is a stroke of this brush, reapply in the same direction.
+				var strokeSymbols = getStrokeSymbols();
+				for(var strokeNum = 0; strokeNum < strokeSymbols.length; strokeNum++)
+				{
+					//debugTrace("is " + strokeSymbols[strokeNum].name + " a stroke of " + brushSymbol.name);
+					if(brushSymbol.name.toLowerCase() == strokeSymbols[strokeNum].getData(ID_BRUSH_STROKE_SOURCE).toLowerCase())
+					{
+						//debugTrace("reapplying in " + strokeSymbols[strokeNum].name);
+						doc.library.editItem(strokeSymbols[strokeNum].name);
+						mapShapeToPathInThisSymbol(brushShape, boundsElement, expansionBoundsElement, brushSymbol.name, strokeSymbols[strokeNum], RECOLOR_USE_PREVIOUS, undefined, false)
+					}
+				}
+				restore_edit_place(editStack);
+			}
+		}
+	}
+}
+
+stripFolderPath = function(path)
+{
+	return path.slice(path.lastIndexOf("/") + 1)
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Remaps multiple brushes, as passed in an array of brush names
+//
+///////////////////////////////////////////////////////////////////////////
+
+remapBrushesToStrokes = function(brushNames, strokeSymbols)
+{
+	var liberalMatching;
+	if(doc && brushNames && brushNames.length)
+	{
+		var editStack = save_edit_place();
+		//var strokeSymbols = getStrokeSymbols();
+
+		for(nBrush = 0; nBrush < brushNames.length; nBrush++)
+		{
+			//debugTrace("Selecting brush " + brushNames[nBrush]);
+			doc.library.selectNone();
+			doc.library.selectItem(brushNames[nBrush]);
+			// If we didn't find the brush symbol in the folder it was originally in, search everywhere else in the library
+			if(doc.library.getSelectedItems().length === 0)
+			{
+				liberalMatching = true;
+				//debugTrace("Didn't find " + brushNames[nBrush] + ". Looking in other folders");
+				for(var nItem = 0; nItem < doc.library.items.length; nItem++)
+				{
+					if(stripFolderPath(brushNames[nBrush]) == stripFolderPath(doc.library.items[nItem].name))
+					{
+						//debugTrace("Found " + doc.library.items[nItem].name);
+						doc.library.selectItem(doc.library.items[nItem].name);
+						break;
+					}
+				}
+			}
+			else liberalMatching = false;
+
+			if(doc.library.getSelectedItems().length == 1)
+			{		
+				//debugTrace("remapping " + brushNames[nBrush] + " globally");
+				var brushSymbol = doc.library.getSelectedItems()[0];
+				//debugTrace("remapping a brush globally 2");
+				// Get the shape data from the selected library item
+				var brushShape = getBrushShape(brushSymbol);
+				var boundsElement = getBrushBounds(brushSymbol);
+				var expansionBoundsElement = getBrushExpansionBounds(brushSymbol);
+
+				//debugTrace("remapping a brush globally 3");
+
+				if(brushShape == null)
+					fl.trace(BRUSH_HAS_NO_ART_WARNING);
+				else
+				{
+					// For each stroke symbol x, if x is a stroke of this brush, reapply in the same direction.
+					for(var strokeNum = 0; strokeNum < strokeSymbols.length; strokeNum++)
+					{
+						var thisBrushName = strokeSymbols[strokeNum].getData(ID_BRUSH_STROKE_SOURCE);
+						//debugTrace("is " + strokeSymbols[strokeNum].name + " a stroke of " + brushSymbol.name);
+						if(brushSymbol.name == thisBrushName ||
+							(liberalMatching && stripFolderPath(brushSymbol.name) == stripFolderPath(thisBrushName)))
+						{
+							//debugTrace("reapplying in " + strokeSymbols[strokeNum].name);
+							doc.library.editItem(strokeSymbols[strokeNum].name);
+							mapShapeToPathInThisSymbol(brushShape, boundsElement, expansionBoundsElement, brushSymbol.name, strokeSymbols[strokeNum], RECOLOR_USE_PREVIOUS, undefined, false)
+						}
+					}
+
+				}
+			}
+		}
+
+		restore_edit_place(editStack);
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+itemIsBrushStroke = function(item, allowBadStructure)
+{
+	if(allowBadStructure)
+	{
+		//debugTrace(item.name + " brush data exists? " + item.hasData(ID_BRUSH_STROKE_SOURCE));
+		if(item.hasData(ID_BRUSH_STROKE_SOURCE))
+			return true;
+		else if(item.name.toLowerCase().indexOf(BRUSH_STROKE_LIBRARY_PATH.toLowerCase()) != -1 ||     // if it's in the brush stroke folder
+				item.name.toLowerCase().indexOf(BRUSH_STROKE_NAME_PREFIX.toLowerCase()) != -1)        // or had "brush_stroke_" in its name
+		{
+			//debugTrace("Looks like " + item.name + " is probably a brush stroke, based on its name");
+			return true;
+		}
+	}
+	return (item.hasData(ID_BRUSH_STROKE_SOURCE) &&
+			item.timeline &&  
+			item.timeline.layers.length >= 2 &&
+			item.timeline.layers[0].name == BRUSH_STROKE_LAYER_NAME && 
+			item.timeline.layers[1].name == PATH_LAYER_NAME);
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+itemIsBrush = function(item)
+{
+	var itemNameStrippedLC = item.name.slice(item.name.lastIndexOf("/") + 1).toLowerCase();
+	//debugTrace("itemIsBrush: itemNameStrippedLC = " + itemNameStrippedLC);
+	return ((item.itemType == "graphic" ||  item.itemType == "movie clip" || item.itemType == "button") &&
+			itemNameStrippedLC.slice(0, BRUSH_NAME_PREFIX.length) == BRUSH_NAME_PREFIX);
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+elementIsBrushStroke = function(el, allowBadStructure)
+{
+	if(el.libraryItem)
+		return itemIsBrushStroke(el.libraryItem, allowBadStructure);
+	else return false;
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+elementIsBrushSymbol = function(el)
+{
+	if(el.libraryItem)
+		return itemIsBrush(el.libraryItem);
+	else return false;
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Go through the library and reassign all the brush strokes to 
+// refer to the new names of their brushes
+
+reassignBrushStrokes = function(renameHash)
+{
+	//debugTrace("Reassigning strokes");
+	var lib = doc.library;
+	var items = lib.items;
+	for(var nItem = 0; nItem < items.length; nItem++)
+	{
+		//debugTrace("checking item " + items[nItem].name);
+		if(itemIsBrushStroke(items[nItem]))
+		{
+			var itemBrushName = items[nItem].getData(ID_BRUSH_STROKE_SOURCE).toLowerCase();
+			//debugTrace(items[nItem].name + " is a stroke of " + itemBrushName);
+			var newBrushName = renameHash[itemBrushName];
+			//debugTrace("renameHash['" + itemBrushName + "']  is '" + newBrushName + "'");
+
+			// Now, if this stroke's brush is in our list its new name will 
+			// be in newBrushName. If not, see if we can strip off folder
+			// info from the stroke's brush name. If so, try checking the 
+			// list again without the folder info.
+			if(!newBrushName && itemBrushName.search("/") != -1)
+			{
+				newBrushName = renameHash[itemBrushName.slice(itemBrushName.lastIndexOf("/") + 1)];
+			}
+
+			// If the brush was found in our list, change it in the stroke
+			if(newBrushName)
+			{
+				//debugTrace("changing " + items[nItem].name + " to refer to " + newBrushName) + " (stripped)";
+				items[nItem].addData(ID_BRUSH_STROKE_SOURCE, "string", newBrushName);
+			}
+		}
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////////
+
+reloadArtBrushPanel = function()
+{
+	//debugTrace("reload art brush panel");
+	if(fl.swfPanels.length > 0)
+	{ 
+		for(var x = 0; x < fl.swfPanels.length; x++)
+		{ 
+			// look for a SWF panel of the specified name, then call the specified AS3 function 
+			// in this example, the panel is named "test" and the AS3 callback is "callMySWF" 
+
+			//debugTrace("looking at panel " + fl.swfPanels[x].name);
+			if(fl.swfPanels[x].name == ART_BRUSH_PANEL_NAME) // name busted? 
+			{ 
+				//debugTrace("trying to call callback");
+				fl.swfPanels[x].call("reloadBrushesCallback", ""); 
+				break; 
+			} 
+		} 
+	} 
+	//else 
+	//	//debugTrace("Art brush panel not loaded"); 
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+LibraryItemRenamer = function()
+{
+	this.itemList = [];
+}
+
+//-------------------------------------------------------------------------
+
+LibraryItemRenamer.prototype.addItem = function(_item, _newName, _folderDest)
+{
+	// Strip a trailing slash if it's there
+	if(_folderDest && _folderDest.lastIndexOf("/") == _folderDest.length - 1)
+		_folderDest = _folderDest.slice(0, _folderDest.length - 1);
+
+	this.itemList.push({item: _item, newName: _newName, folderDest: _folderDest});
+}
+
+//-------------------------------------------------------------------------
+
+LibraryItemRenamer.prototype.rename = function()
+{
+	var renameHash = {};
+	var hashCount = 0;
+	var reloadBrushPanel = false;
+
+	for(var n = 0; n < this.itemList.length; n++)
+	{
+		//debugTrace("Checking out item #" + n + ", " + this.itemList[n].item.name);
+		// If this item is a brush, add it to the list of brush renames
+		if(itemIsBrush(this.itemList[n].item))
+		{
+			reloadBrushPanel = true;
+			// this item is a brush. Do a "smart rename"
+			// Add this brush name to the hash table
+			var hashKey = this.itemList[n].item.name.toLowerCase();
+			//debugTrace("renameHash['" + hashKey + "'] = '" + this.itemList[n].newName + "'");
+			if(this.itemList[n].folderDest)
+				renameHash[hashKey] = this.itemList[n].folderDest + "/" + this.itemList[n].newName;
+			else 
+				renameHash[hashKey] = this.itemList[n].item.name.slice(0, this.itemList[n].item.name.lastIndexOf("/") + 1) + 
+									  this.itemList[n].newName;
+
+			hashCount++;
+
+			// ... and add it with any folder info stripped out
+			if(this.itemList[n].item.name.search("/") != -1)
+			{
+				var strippedName = this.itemList[n].item.name.slice(this.itemList[n].item.name.lastIndexOf("/") + 1).toLowerCase();
+				//debugTrace("Adding " + strippedName + " to hash table");
+				renameHash[strippedName.toLowerCase()] = this.itemList[n].newName;
+				hashCount++;
+			}
+		}
+
+		// If a new folder was specified, add that to the name. Otherwise, use the old folder.
+		var symbolFolder = "";
+		//debugTrace("-------- folderDest is " + this.itemList[n].folderDest);
+		//debugTrace("-------- item name is " + this.itemList[n].item.name);
+		if(this.itemList[n].folderDest)
+			symbolFolder = this.itemList[n].folderDest;
+		//else symbolFolder = this.itemList[n].item.name.slice(0, this.itemList[n].item.name.lastIndexOf("/"));
+
+		//debugTrace("new folder is " + symbolFolder);
+
+		// Rename the item
+		this.itemList[n].item.name = this.itemList[n].newName;
+
+		if(itemIsBrush(this.itemList[n].item))
+			reloadBrushPanel = true;
+
+		// Move it to its new folder
+		if(symbolFolder)
+		{
+			//debugTrace("Moving '" + this.itemList[n].item.name + "' to '" + symbolFolder + "'");
+			lib.selectItem(this.itemList[n].item.name);
+			lib.moveToFolder(symbolFolder);
+		}
+	}
+
+	// if there are any entries in the rename hashtable
+	if(hashCount)
+	{
+		//debugTrace("hashCount = " + hashCount);
+		//debugTrace("number of elements in renameHash = " + renameHash.__count__);
+		// Go through the library and reassign all the brush strokes to 
+		// refer to the new names of their brushes
+		reassignBrushStrokes(renameHash);
+	}
+	if(this.itemList.length && reloadBrushPanel)
+		reloadArtBrushPanel();
+}
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+
+doc = fl.getDocumentDOM();
+fl.outputPanel.clear();

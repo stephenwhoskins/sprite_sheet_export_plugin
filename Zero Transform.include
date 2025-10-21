@@ -1,0 +1,931 @@
+/////////////////////////////////////////////////////////////////////////
+//
+// Zero Transform.include
+//
+// Programmed by David Hernston
+// http://blog.pinkandaint.com/
+// Last modified April 21 2016
+//
+// This is the include file for the Zero Transform commands.  To use,
+// include this file and call zero_transform() with optional parameters
+// to zero at a given scale (that is, the selected symbol instance will
+// be at the given scale, but visually be identical to its original 
+// position)
+//
+/////////////////////////////////////////////////////////////////////////
+
+fl.runScript(fl.configURI + "Commands/auto tween.include");
+
+doc = flash.getDocumentDOM();
+var progress = undefined;
+
+var MATRIX_2_TEXT_DECIMAL_PLACES = 2;
+
+//fl.outputPanel.clear();
+
+/////////////////////////////////////////////////////////////////////////
+// matrix2Text
+//
+// Returns a text readout of the matrix components
+/////////////////////////////////////////////////////////////////////////
+
+matrix2Text = function(m)
+{
+	return "a: " + m.a.toFixed(MATRIX_2_TEXT_DECIMAL_PLACES) + ", b: " + m.b.toFixed(MATRIX_2_TEXT_DECIMAL_PLACES) + 
+	       ", c: " + m.c.toFixed(MATRIX_2_TEXT_DECIMAL_PLACES) + ", d: " + m.d.toFixed(MATRIX_2_TEXT_DECIMAL_PLACES) + 
+		   ", tx: " + m.tx.toFixed(MATRIX_2_TEXT_DECIMAL_PLACES) + ", ty: " + m.ty.toFixed(MATRIX_2_TEXT_DECIMAL_PLACES);
+}
+
+/////////////////////////////////////////////////////////////////////////
+// Save and restore the visible and locked properties in the current or specified timeline
+/////////////////////////////////////////////////////////////////////////
+
+saveLayerProperties = function(showAndUnlock, targetTimeline)
+{
+	//fl.trace("saveLayerProperties(" + showAndUnlock + ")")
+	var visibleArray = []
+	var lockedArray = [];
+	var layerNames = [];
+	var layerTypes = [];
+	var layerParents = [];
+	var tl;
+
+    if(targetTimeline)
+        tl = targetTimeline;
+    else tl = fl.getDocumentDOM().getTimeline();
+	
+	//fl.trace("2 Saving layer properties in " + tl.name);
+	if(showAndUnlock == undefined)
+		showAndUnlock = true;
+	
+	//fl.trace("3 Saving layer properties in " + tl.name);
+	
+	for(var n = 0; n < tl.layerCount; n++)
+	{
+		//fl.trace("Saving layer properties in layer '" + tl.layers[n].name + "'");
+
+		visibleArray[n] = tl.layers[n].visible;
+		lockedArray[n] = tl.layers[n].locked;
+		layerNames[n] = tl.layers[n].name;
+		layerTypes[n] = tl.layers[n].layerType;
+		layerParents[n] = tl.layers[n].parentLayer;
+
+		if(showAndUnlock)
+		{
+			tl.layers[n].visible = true;
+			tl.layers[n].locked = false;
+		}
+	}	
+	
+	var retObj = {visible: visibleArray, locked: lockedArray, names: layerNames, types: layerTypes, parents: layerParents};
+	
+	return retObj;
+}
+
+restoreLayerProperties = function(propObj, layers)
+{
+    // If layers wasn't passed, we'll assume we're talking about the currently edited timeline.
+    if(layers === undefined)
+        layers = fl.getDocumentDOM().getTimeline().layers;
+    
+    var layerOffset = 0;
+
+    if(layers.length != propObj.visible.length)
+    {
+        //fl.trace("Error! Mismatched number of layers in restoreLayerProperties()");
+        //fl.trace("       expected " + propObj.visible.length + " layers, found " + layers.length);
+    }
+
+
+    var n = 0;
+    while(n + layerOffset < layers.length && n < propObj.visible.length)
+    {
+        //fl.trace("Looking for layer '" + propObj.names[n] + "' on layer #" + (n + layerOffset) + ", '" + layers[n + layerOffset].name + "'");
+        //fl.trace("Setting layer " + n + " visibility to " + propObj.visible[n]);
+        //fl.trace("Setting layer " + n + " locked to " + propObj.locked[n]);
+        
+        // If this layer doesn't match the name from the properties list then 
+        // increment until it does or we run out of layers
+        while((n + layerOffset) < layers.length && layers[n + layerOffset].name != propObj.names[n])
+        {
+            //fl.trace("Didn't find the right layer here.");
+            //fl.trace("                              n = " + n);
+            //fl.trace("                    layerOffset = " + layerOffset);
+            //fl.trace("               layers.length = " + layers.length);
+            //fl.trace("layers[n + layerOffset].name = " + layers[n + layerOffset].name);
+            
+            layerOffset++;
+        }
+        //fl.trace("Exited the layer finding While loop.");
+        //fl.trace("                              n = " + n);
+        //fl.trace("                    layerOffset = " + layerOffset);
+        //fl.trace("               layers.length = " + layers.length);
+        //if(n + layerOffset < layers.length)
+        //	fl.trace("layers[n + layerOffset].name = " + layers[n + layerOffset].name);
+        
+        if(n + layerOffset < layers.length)
+        {
+            layers[n + layerOffset].visible = propObj.visible[n];
+            layers[n + layerOffset].locked = propObj.locked[n];
+            layers[n + layerOffset].layerType = propObj.types[n];
+            layers[n + layerOffset].parentLayer = propObj.parents[n];
+        }
+        n++;
+    }	
+
+    // If we got to the end without handling all the original layers, isssue a warning
+    if(n  < propObj.visible.length)
+    {
+        fl.trace("Warning: one or more missing layers on restoreLayerProperties()");
+        //var stack = new Error().stack
+        //fl.trace("PRINTING CALL STACK")
+        //fl.trace(stack);
+        return false;
+    }
+    return true;
+}
+
+/////////////////////////////////////////////////////////////////////////
+// Save and restore the layerType properties in the current timeline
+/////////////////////////////////////////////////////////////////////////
+
+saveAndGuideLayers = function()
+{
+	var doc = fl.getDocumentDOM();
+	var tl = doc.getTimeline();
+	var layers = tl.layers;
+	var layerTypes = [];
+	var giveWarning = false;
+
+	for(var n = 0; n < layers.length; n++)
+	{
+		//fl.trace("saving layer type " + layers[n].layerType);
+		if(layers[n].layerType == "mask" || layers[n].layerType == "masked")
+			giveWarning = true;
+		layerTypes[n] = layers[n].layerType;
+		layers[n].layerType = "guide";
+	}
+	
+	if(giveWarning)
+		fl.trace("Warning: this tool might not work fully with masked layers");
+	
+	return layerTypes;
+}
+
+restoreLayerTypes = function(layerTypes)
+{
+	var doc = fl.getDocumentDOM();
+	var tl = doc.getTimeline();
+	var layers = tl.layers;
+	
+	for(var n = 0; n < layerTypes.length; n++)
+	{
+		//fl.trace("setting layer type to " + layerTypes[n]);
+		layers[n].layerType = layerTypes[n];
+	}
+}
+
+/////////////////////////////////////////////////////////////////////////
+// transform_in_timeline = function(timeline, lib_item, trans)
+//
+// Transform all instances of lib_item in a timeline
+/////////////////////////////////////////////////////////////////////////
+
+transform_in_timeline = function(lib_item, new_transform)
+{
+	if(!doc) doc = fl.getDocumentDOM();
+	
+	var frame_index;
+	var layer;
+	var n = 0, m = 0;
+	timeline = doc.getTimeline();
+	
+	//fl.trace("transforming in timeline " + timeline.name);
+
+	for(n = 0; n < timeline.layers.length; n++)
+	{
+		//fl.trace("\tlayer " + n);
+		layer = timeline.layers[n];
+		frame_index = 0;
+		while(layer.frames[frame_index] != undefined)
+		{
+			// first deselect all the elements on this frame
+			timeline.currentFrame = frame_index;
+			doc.selectNone();
+			
+			elements = layer.frames[frame_index].elements;
+			//fl.trace("\t\tframe " + frame_index + " with " + elements.length + " elements");
+			for(m = 0; m < elements.length; m++)
+			{
+				//fl.trace("\t\telement type: " + elements[m].elementType);
+				transform_element(elements[m], lib_item, new_transform);
+			}
+			//fl.trace("duration: " + layer.frames[frame_index].duration);
+			frame_index += layer.frames[frame_index].duration;
+		}
+	}
+	
+}
+
+/////////////////////////////////////////////////////////////////////////
+// transform_in_timeline_multiple = function(lib_items, new_transforms)
+//
+// Transform all instances of the library items in lib_items in the current timeline
+/////////////////////////////////////////////////////////////////////////
+
+transform_in_timeline_multiple = function(lib_items, new_transforms)
+{
+	if(!doc) doc = fl.getDocumentDOM();
+	
+	var frame_index;
+	var layer;
+	var n = 0, m = 0;
+	timeline = doc.getTimeline();
+	
+	//fl.trace("transforming in timeline " + timeline.name);
+
+	var n;
+	for(n = 0; n < timeline.layers.length; n++)
+	{
+		//fl.trace("\tlayer " + n);
+		layer = timeline.layers[n];
+		frame_index = 0;
+		while(layer.frames[frame_index] != undefined)
+		{
+			// first deselect all the elements on this frame
+			//timeline.currentFrame = frame_index;
+			//doc.selectNone();
+			
+			elements = layer.frames[frame_index].elements;
+			//fl.trace("\t\tframe " + frame_index + " with " + elements.length + " elements");
+			var m;
+			for(m = 0; m < elements.length; m++)
+			{
+				// Try to run for every item in lib_items
+				var i;
+				for(i = 0; i < lib_items.length; i++)
+				{
+					//fl.trace("\t\telement type: " + elements[m].elementType);
+					transform_element(elements[m], lib_items[i], new_transforms[i]);
+				}
+			}
+			//fl.trace("duration: " + layer.frames[frame_index].duration);
+			frame_index += layer.frames[frame_index].duration;
+		}
+	}
+	
+}
+
+transform_element = function(el, lib_item, new_transform)
+{
+	//fl.trace("transform an element");
+	if(el.elementType == "instance")
+	{
+		//fl.trace("found an instance");
+		if(el.instanceType == "symbol" && el.libraryItem == lib_item)
+		{
+			//fl.trace("found a symbol: " + lib_item.name);
+			//fl.trace("old: " + el.skewX + ", " + el.skewY);
+			var old_matrix = el.matrix;
+			var old_tx = old_matrix.tx;
+			var old_ty = old_matrix.ty;
+			old_matrix.tx = old_matrix.ty = 0;
+			var new_matrix = fl.Math.concatMatrix(fl.Math.invertMatrix(new_transform), old_matrix);
+			new_matrix.tx = old_tx - (new_transform.tx * new_matrix.a + new_transform.ty * new_matrix.c);
+			new_matrix.ty = old_ty - (new_transform.tx * new_matrix.b + new_transform.ty * new_matrix.d);
+			el.matrix = new_matrix;
+		}
+		
+		// No idea why, but for some reason Javascript seems to need a statement here
+		doc = doc;
+	}
+	else if(el.elementType == "shape" && el.isGroup && el.members)
+	{
+		//fl.trace("found a group");
+		
+		var mem_idx;
+		for(mem_idx = 0; mem_idx < el.members.length; mem_idx++)
+		{
+			transform_element(el.members[mem_idx], lib_item, new_transform);
+		}
+	}
+}
+
+/////////////////////////////////////////////////////////////////////////
+// transform_global = function(lib_item, new_transform)
+//
+// Transform all instances of lib_item in the whole document
+/////////////////////////////////////////////////////////////////////////
+
+transform_global = function(lib_item, new_transform)
+{
+	if(!doc) doc = fl.getDocumentDOM();
+	
+	var n = 0;
+	
+	// First do it in all the timelines in the document
+	
+	for(n = 0; n < doc.timelines.length; n++)
+	{
+		doc.editScene(n)
+		transform_in_timeline(lib_item, new_transform);
+	}
+	
+	// Now do it in the timelines of all the library symbols
+	
+	//fl.trace("Now symbols");
+	
+	var items =  doc.library.items;
+	for(n = 0; n < items.length; n++)
+	{
+		if(items[n] != lib_item)
+		{
+			// If it has a timeline, transform all instances of lib_item in that timeline
+			
+			if(items[n].itemType == "movie clip" || items[n].itemType == "graphic" || items[n].itemType == "button")
+			{
+				doc.library.editItem(items[n].name);
+				transform_in_timeline(lib_item, new_transform);
+			}
+		}
+	}
+}
+
+/////////////////////////////////////////////////////////////////////////
+// transform_global_multiple = function(lib_items, new_transforms)
+//
+// Transform all instances of the library items in lib_items in the whole document
+/////////////////////////////////////////////////////////////////////////
+
+transform_global_multiple = function(lib_items, new_transforms)
+{
+	if(!doc) doc = fl.getDocumentDOM();
+	
+	var n = 0;
+	var numTimelines = doc.timelines.length + doc.library.items.length;
+	
+	// First do it in all the timelines in the document
+	
+	for(n = 0; n < doc.timelines.length; n++)
+	{
+		doc.editScene(n)
+		if(progress)
+			progress.setProgress(n / numTimelines);
+		//fl.trace("transforming in scene: " + doc.getTimeline().name);
+		transform_in_timeline_multiple(lib_items, new_transforms);
+	}
+	var numScenes = n;
+	// Now do it in the timelines of all the library symbols
+	
+	//fl.trace("Now symbols");
+	
+	var items =  doc.library.items;
+	for(n = 0; n < items.length; n++)
+	{
+		// If it has a timeline, transform all instances of the lib_items in that timeline
+		
+		if(items[n].itemType == "movie clip" || items[n].itemType == "graphic" || items[n].itemType == "button")
+		{
+			doc.library.editItem(items[n].name);
+			if(progress)
+				progress.setProgress((n + numScenes) / numTimelines);
+			//fl.trace("transforming in symbol: " + items[n].name);
+			transform_in_timeline_multiple(lib_items, new_transforms);
+		}
+	}
+}
+
+/////////////////////////////////////////////////////////////////////////
+// transformTimeline(trans_matrix)
+//
+// Transforms all elements on the current timeline
+/////////////////////////////////////////////////////////////////////////
+
+transformTimeline = function(trans_matrix, line_resize)
+{
+	if(!doc) doc = fl.getDocumentDOM();
+	
+	var layer_locked = new Array();
+	var layer_visible = new Array();
+	var layernum, framenum;
+	var layers;
+	var frame_index;
+	var next_keyframe, this_next_key;
+
+	layers = doc.getTimeline().layers;
+	
+	//fl.trace("transformTimeline: transforming timeline " + doc.getTimeline().name);
+
+	// Unlock and unhide all layers
+	for(layernum = 0; layernum < layers.length; layernum++)
+	{
+		layer_locked[layernum] = layers[layernum].locked;
+ 		layer_visible[layernum] = layers[layernum].visible;
+		layers[layernum].visible = true;
+		layers[layernum].locked = false;
+	}
+
+/*  // This is to try to solve a bug that was causing a crash when resizing strokes
+	// Deselect everything in the timeline
+	var timer = new Profiler();
+	for(var nFrame = 0; nFrame < doc.getTimeline().frameCount; nFrame++)
+	{
+		doc.getTimeline().currentFrame = nFrame;
+		doc.selectAll();
+		doc.selectNone();
+	}
+	timer.mark("finished deselecting timeline");
+	fl.trace(timer);
+*/
+	
+	frame_index = 0;
+	while(frame_index < doc.getTimeline().frameCount)
+	{
+		doc.getTimeline().currentFrame = frame_index;
+		
+		for(layernum = 0; layernum < layers.length; layernum++)
+		{
+			// Check all the layers.  If this is a keyframe, unlock the layer.
+			// If not, lock it.
+			if(layers[layernum].frames[frame_index] != undefined)
+			{
+				if(layers[layernum].frames[frame_index].startFrame == frame_index)
+					layers[layernum].locked = false;
+				else layers[layernum].locked = true;
+			}
+			
+			//fl.trace("layers[" + layernum + "].locked is " + layers[layernum].locked);
+		}		
+
+		doc.selectNone();
+		doc.selectAll();
+		//fl.trace("transformTimeline: selected all");
+		
+		// If anything is selected (i.e. these keyframes aren't empty), do the transformation
+		if(doc.selection.length)
+		{
+
+			//First group everything so we can set a pivot point without affecting a symbol instance's pivot point
+			doc.group();
+			//fl.trace("transformTimeline: grouped");
+
+			// Transform everything from (0,0)
+			doc.setTransformationPoint({x:0, y:0});
+			doc.transformSelection(trans_matrix.a, trans_matrix.b, trans_matrix.c, trans_matrix.d);
+			//fl.trace("transformTimeline: transformed selection");
+			//fl.trace("moving selection by " + trans_matrix.tx + ", " + trans_matrix.ty);
+			doc.moveSelectionBy({x:trans_matrix.tx, y:trans_matrix.ty});
+			//fl.trace("transformTimeline: ungrouped");			
+
+			if(line_resize)
+			{
+				//fl.trace("transformTimeline: scaling lines");
+				scale_selected_lines(trans_matrix);
+			}
+			//fl.trace("transformTimeline: scaled lines");
+			doc.unGroup();
+			doc.selectNone();
+		}
+	
+		// Set next_keyframe to a big number
+		next_keyframe = 0x7fff;
+		
+		for(layernum = 0; layernum < layers.length; layernum++)
+		{
+			// If this layer's next keyframe is closer than next_keyframe, replace 
+			// next_keyframe with the frame number of this layers's next key.
+			
+			if(layers[layernum].frames[frame_index] != undefined)
+			{
+				this_next_key = layers[layernum].frames[frame_index].startFrame + layers[layernum].frames[frame_index].duration;
+				if(this_next_key < next_keyframe)
+					next_keyframe = this_next_key;
+			}
+		}
+		frame_index = next_keyframe;
+	}
+
+	// return all the layers to their lock & hide states
+	for(layernum = 0; layernum < layers.length; layernum++)
+	{
+		layers[layernum].locked = layer_locked[layernum];
+ 		layers[layernum].visible = layer_visible[layernum];
+	}
+}
+
+scale_selected_lines = function(trans_matrix)
+{
+	if(!doc) doc = fl.getDocumentDOM();
+	
+	if(doc.selection.length)
+	{
+		var n;
+		var elementQueue = [];
+	
+		// Copy the selection into the queue of elements to operate on
+		//for(n = 0; n < doc.selection.length; n++)
+		//	elementQueue[n] = doc.selection[n];	
+		elementQueue = doc.selection;
+		//doc.selectNone();
+		
+		var transComp = new transform_components(trans_matrix);
+		// Scale the lines to the scale of the matrix passed to this function
+		var lineScale = (transComp.scale_x + transComp.scale_y) / 2.0;
+		
+		var newGroupCount = 0;
+		
+		while(elementQueue.length)
+		{	
+			var el = elementQueue.pop();
+			//fl.trace("Element is group: " + el.isGroup);
+			//fl.trace("Element is drawing object: " + el.isDrawingObject);
+				
+			if(el.elementType == "shape")
+			{
+				if( el.edges.length)
+				{
+					//fl.trace("traversing " + el.edges.length + " edges");
+					var nEdge;
+					var edgeVisited = {};
+					do
+					{
+						var foundAnUnvisitedEdge = false;
+						// Go through all the edges. For each, if it hasn't been visited yet, 
+						// get its halfEdge and trace the path from there. We'll repeat this 
+						// process until we go through the whole list of edges and they've all 
+						// been visited
+						for(nEdge = 0; nEdge < el.edges.length; nEdge++)
+						{
+							if(!edgeVisited[el.edges[nEdge].id])
+							{
+								foundAnUnvisitedEdge = true;
+								var thisHalfEdge = el.edges[nEdge].getHalfEdge(0);
+								// Trace this halfEdge forward
+								while(thisHalfEdge)
+								{
+									var thisEdge = thisHalfEdge.getEdge();
+									if(edgeVisited[thisEdge.id])
+										break;
+									edgeVisited[thisEdge.id] = true;
+									var thisStroke = thisEdge.stroke;
+									if(thisStroke)
+									{
+										thisStroke.thickness *= lineScale;
+										thisEdge.stroke = thisStroke
+									}
+									thisHalfEdge = thisHalfEdge.getNext();
+								} 
+								thisHalfEdge = el.edges[nEdge].getHalfEdge(0).getPrev();
+								// Trace this halfEdge backward
+								while(thisHalfEdge)
+								{
+									var thisEdge = thisHalfEdge.getEdge();
+									if(edgeVisited[thisEdge.id])
+										break;
+									edgeVisited[thisEdge.id] = true;
+									thisStroke = thisEdge.stroke;
+									if(thisStroke)
+									{
+										thisStroke.thickness *= lineScale;
+										thisEdge.stroke = thisStroke
+									}
+									thisHalfEdge = thisHalfEdge.getPrev();
+								} 
+							}
+						}
+					} while (foundAnUnvisitedEdge);
+				}
+				if(el.isGroup && el.members)
+				{
+					//fl.trace("found a group with members");
+					for(var mem = 0; mem < el.members.length; mem++)
+						elementQueue.push(el.members[mem]); 
+				}
+			}
+		}
+	}
+}
+
+/////////////////////////////////////////////////////////////////////////
+// save_edit_place()
+//
+// Remembers where the user is currently editing-in-place
+/////////////////////////////////////////////////////////////////////////
+
+save_edit_place = function()
+{
+	if(!doc) doc = fl.getDocumentDOM();
+	
+	var edit_stack = new Array();
+	var edit_stack_entry;
+	
+	//fl.trace("saving edit place");
+
+	edit_stack_entry = new Object();
+	edit_stack_entry.frame = doc.getTimeline().currentFrame;
+	edit_stack_entry.selection = doc.selection;
+	edit_stack.push(edit_stack_entry);
+	//fl.trace("initial frame: " + edit_stack_entry.frame);
+	
+	//fl.trace("initial timeline's name: " + doc.getTimeline().name);
+	//fl.trace("initial core timeline's name: " + doc.timelines[doc.currentTimeline].name);
+	while(doc.getTimeline().name != doc.timelines[doc.currentTimeline].name)
+	{
+		edit_stack_entry = new Object();
+		edit_stack_entry.timelineName = doc.getTimeline().name;
+		doc.exitEditMode();
+		edit_stack_entry.object = doc.selection[0];
+		edit_stack_entry.frame = doc.getTimeline().currentFrame;
+		edit_stack.push(edit_stack_entry);
+
+		//fl.trace("added " + edit_stack_entry.object.libraryItem.name + " to the edit stack");
+		
+		//fl.trace("exited back to " + doc.getTimeline().name + ", now stack length is " + edit_stack.length);
+	}
+	
+	edit_stack.push(doc.currentTimeline);
+	
+	//fl.trace("edit stack length: " + edit_stack.length);
+	return edit_stack;
+}
+
+/////////////////////////////////////////////////////////////////////////
+// restore_edit_place(edit_stack, )
+//
+// Remembers where the user is currently editing-in-place
+/////////////////////////////////////////////////////////////////////////
+
+restore_edit_place = function(edit_stack)
+{
+	if(!doc) doc = fl.getDocumentDOM();
+	
+	var edit_stack_entry;
+	var editStackValid = true;
+	
+	//fl.trace("restoring edit place");
+	
+	doc.currentTimeline = edit_stack.pop();
+	//fl.trace("set currentTimeline to " + doc.timelines[doc.currentTimeline].name);
+	
+	while(doc.getTimeline().name != doc.timelines[doc.currentTimeline].name)
+	{
+		doc.exitEditMode();
+	}
+	
+	while(edit_stack.length > 1)
+	{
+		edit_stack_entry = edit_stack.pop();
+		doc.getTimeline().currentFrame = edit_stack_entry.frame;
+		//fl.trace("about to set selection in " + doc.getTimeline().name);
+		//fl.trace("about to select " + edit_stack_entry.object.libraryItem.name + " on frame " + edit_stack_entry.frame);
+		if(edit_stack_entry.object)
+		{
+			doc.selectNone();
+			doc.selection = [edit_stack_entry.object];
+			//fl.trace("re-editing " + doc.selection[0].libraryItem.name + " on frame " + edit_stack_entry.frame);
+			doc.enterEditMode("inPlace");
+			//fl.trace("I think " + doc.getTimeline().name + " = " + edit_stack_entry.timelineName);
+
+			// If the current timeline name doesn't match the one we meant 
+			// to be into then the edit stack is invalid. Go back to the 
+			// base timeline.
+			if(edit_stack_entry.timelineName != doc.getTimeline().name)
+			{
+				doc.editScene(0);
+				editStackValid = false
+				//fl.trace("Looks like there was some non-in-place editing. Returning to base timeline.");
+				break;
+			}
+		}
+	}
+	
+	if(editStackValid)
+	{
+		edit_stack_entry = edit_stack.pop();
+		doc.getTimeline().currentFrame = edit_stack_entry.frame;
+		//fl.trace("final frame: " + edit_stack_entry.frame);
+		doc.selection = [];
+	}
+}
+
+/////////////////////////////////////////////////////////////////////////
+// MAIN
+/////////////////////////////////////////////////////////////////////////
+
+//fl.trace("Current timeline is " + doc.getTimeline().name);
+
+zero_transform = function(x_scale, y_scale)
+{
+	if(!doc) doc = fl.getDocumentDOM();
+	
+	// If parameters weren't passed, load in the default values
+	if(x_scale == undefined)
+		x_scale = y_scale = 1.0;
+	else if(y_scale == undefined)
+		y_scale = x_scale;
+		
+	var original_selection = doc.selection;
+	var original_timeline = doc.currentTimeline;
+	
+	for(var i = 0; i < original_selection.length; i++)
+	{
+		var obj = original_selection[i];
+		doc.selectNone();
+		doc.selection = [obj];
+	
+		// First make sure the selection is a symbol instance
+		if(obj.elementType == "instance" && obj.instanceType == "symbol")
+		{
+			original_transform_matrix = obj.matrix;
+			original_transform_matrix.tx = original_transform_matrix.ty = 0;
+			
+			var pivot = obj.getTransformationPoint();
+			//fl.trace("pivot point is at " + pivot.x + ", " + pivot.y);
+			
+			// First transform the contents of the symbol's timeline
+			
+			//fl.trace("Transforming the contents of " + obj.libraryItem.name);
+			doc.enterEditMode("inPlace");
+			new_transform = {a:1/x_scale, b:0, c:0, d:1/y_scale, tx:0, ty:0};
+			new_transform = fl.Math.concatMatrix(original_transform_matrix, new_transform);
+			new_transform.tx = -(pivot.x * new_transform.a + pivot.y * new_transform.c);
+			new_transform.ty = -(pivot.x * new_transform.b + pivot.y * new_transform.d);
+			
+			//fl.trace("transformed pivot point is at " + new_transform.tx + ", " + new_transform.ty);
+			
+			transformTimeline(new_transform);
+			doc.exitEditMode();
+			var edit_stack = save_edit_place();
+			
+			// Now correct the transform on all the instances of the symbol in the whole FLA
+			
+			//fl.trace("Corrrecting the transformation of all instnaces of " + obj.libraryItem.name);
+			//new_transform.tx = pivot.x;
+			//new_transform.ty = pivot.y;
+			transform_global(obj.libraryItem, new_transform);	
+			
+			restore_edit_place(edit_stack);
+		}
+	}
+}
+
+
+zero_transform_multiple = function(x_scale, y_scale, line_resize)
+{
+	if(!doc) doc = fl.getDocumentDOM();
+	
+	var selectionBounds = doc.getSelectionRect();
+	progress = new ProgBar(0,0);//(selectionBounds.left + selectionBounds.right) / 2.0, (selectionBounds.top + selectionBounds.bottom) / 2.0);
+	
+	if(line_resize == undefined)
+		line_resize = true;
+	
+	// Disable the "this command is taking a long time" message
+	fl.showIdleMessage(false);  
+
+	// If parameters weren't passed, load in the default values
+	if(x_scale == undefined)
+		x_scale = y_scale = 1.0;
+	else if(y_scale == undefined)
+		y_scale = x_scale;
+		
+	var original_selection = doc.selection;
+	var original_timeline = doc.currentTimeline;
+	
+	var items_to_transform = [];
+	var new_transforms = [];
+	var library_item_added = new Object();
+
+	for(var i = 0; i < original_selection.length; i++)
+	{
+		progress.setProgress(i / original_selection.length);
+		var obj = original_selection[i];
+		doc.selectNone();
+		doc.selection = [obj];
+	
+		// First make sure the selection is a symbol instance
+		if(obj.elementType == "instance" && obj.instanceType == "symbol")
+		{
+			// Only operate on this object if its library item isn't already accounted for
+			if(!library_item_added[obj.libraryItem.name])
+			{
+				library_item_added[obj.libraryItem.name] = true;
+				
+				// Add it to the list of items to be transformed
+				items_to_transform.push(obj.libraryItem);
+				var original_transform_matrix = obj.matrix;
+				original_transform_matrix.tx = original_transform_matrix.ty = 0;
+				
+				var pivot = obj.getTransformationPoint();
+				//fl.trace("pivot point is at " + pivot.x + ", " + pivot.y);
+				
+				// First transform the contents of the symbol's timeline
+				
+				//fl.trace("Transforming the contents of " + obj.libraryItem.name);
+				doc.enterEditMode("inPlace");
+				var new_transform = {a:1/x_scale, b:0, c:0, d:1/y_scale, tx:0, ty:0};
+				new_transform = fl.Math.concatMatrix(original_transform_matrix, new_transform);
+				new_transform.tx = -(pivot.x * new_transform.a + pivot.y * new_transform.c);
+				new_transform.ty = -(pivot.x * new_transform.b + pivot.y * new_transform.d);
+				
+				//fl.trace("transformed pivot point is at " + new_transform.tx + ", " + new_transform.ty);
+				
+				transformTimeline(new_transform, line_resize);
+				doc.exitEditMode();
+				
+				new_transforms.push(new_transform);
+			}
+		}
+	}
+	
+	if(items_to_transform.length)
+	{
+		var edit_stack = save_edit_place();
+		
+		// Now correct the transform on all the instances of the library items in the whole FLA
+		transform_global_multiple(items_to_transform, new_transforms);	
+		
+		restore_edit_place(edit_stack);
+		
+		// Re-enable the "this command is taking too long" notification
+	}
+	progress.end();
+	fl.showIdleMessage(true);
+}
+
+zero_transform_multiple_from_queue = function(x_scale, y_scale, line_resize, itemQueue)
+{
+	if(!doc) doc = fl.getDocumentDOM();
+	
+	var selectionBounds = doc.getSelectionRect();
+	progress = new ProgBar(0,0);//(selectionBounds.left + selectionBounds.right) / 2.0, (selectionBounds.top + selectionBounds.bottom) / 2.0);
+	
+	if(line_resize == undefined)
+		line_resize = true;
+	
+	// Disable the "this command is taking a long time" message
+	fl.showIdleMessage(false);  
+
+	// If parameters weren't passed, load in the default values
+	if(x_scale == undefined)
+		x_scale = y_scale = 1.0;
+	else if(y_scale == undefined)
+		y_scale = x_scale;
+		
+	var original_timeline = doc.currentTimeline;
+	var numItems = itemQueue.length;
+	
+	var items_to_transform = [];
+	var new_transforms = [];
+	var library_item_added = new Object();
+
+	for(var i = 0; i < numItems; i++)
+	{
+		progress.setProgress(i / numItems);
+		
+		var itemInfo = itemQueue.dequeue();
+		var item = itemInfo.item;
+		//fl.trace("Dealing with " + item.name);
+	
+		// Only operate on this object if its library item isn't already accounted for
+		if(!library_item_added[item.name])
+		{
+			library_item_added[item.name] = true;
+			
+			// Add it to the list of items to be transformed
+			items_to_transform.push(item);
+			var original_transform_matrix = itemInfo.transform;
+			original_transform_matrix.tx = original_transform_matrix.ty = 0;
+			
+			var pivot = itemInfo.transPoint;
+			//fl.trace("pivot point of " + item.name + " is at " + pivot.x + ", " + pivot.y);
+			
+			// First transform the contents of the symbol's timeline
+			doc.library.editItem(item.name);
+			var new_transform = {a:1/x_scale, b:0, c:0, d:1/y_scale, tx:0, ty:0};
+			new_transform = fl.Math.concatMatrix(original_transform_matrix, new_transform);
+			new_transform.tx = -(pivot.x * new_transform.a + pivot.y * new_transform.c);
+			new_transform.ty = -(pivot.x * new_transform.b + pivot.y * new_transform.d);
+			//fl.trace("transformed pivot point of " + item.name + " is at " + new_transform.tx + ", " + new_transform.ty);
+			
+			transformTimeline(new_transform, line_resize);
+			//fl.trace("transformed timeline of " + item.name);
+			
+			new_transforms.push(new_transform);
+		}
+	}
+	
+	if(items_to_transform.length)
+	{
+		var edit_stack = save_edit_place();
+		
+		// Now correct the transform on all the instances of the library items in the whole FLA
+		transform_global_multiple(items_to_transform, new_transforms);	
+		
+		restore_edit_place(edit_stack);
+		
+		// Re-enable the "this command is taking too long" notification
+	}
+	progress.end();
+	fl.showIdleMessage(true);
+}

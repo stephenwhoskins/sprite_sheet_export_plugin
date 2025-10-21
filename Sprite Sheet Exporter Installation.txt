@@ -1,0 +1,13 @@
+Sprite Sheet Exporter
+By David Hernston
+v1
+Last modified 9/26/2025
+
+
+This is the sprite sheet exporter I wrote for Mac Kerman & colleagues (does your group have a name?). Included are five files:
+
+Art brush.include
+auto tween.include
+Sprite sheet export.jsfl
+Zero Transform.include
+JSON-stacked.plugin.jsfl
