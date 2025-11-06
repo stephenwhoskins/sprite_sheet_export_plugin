@@ -2,9 +2,9 @@
 //////////////////////////////////////////////////////////////////////////////////////////////
 //
 //  Sprite Sheet Exporter
-//  v1
+//  v1.2
 //  By David Hernston
-//  Last modified September 26 2025
+//  Last modified September 27 2025
 //
 //  Exports separate sprite sheets for each layer in a symbol, with the option of
 //  exporting layers in sub-symbols separately (for instance, to export lines and 
@@ -22,6 +22,12 @@
 //  In Windows the following file goes in C:\Program Files\Adobe\Adobe Animate 2024\Common\Configuration\Sprite Sheet Plugins:
 //
 //  JSON-Stacked.plugin.jsfl
+//
+//  REVISIONS
+//
+//  1.2     9/27/2025 Removed some extraneous debugging output
+//  1.1     9/27/2025 Fixed a bug that broke exports when symbols were in folders in the library
+//  1       9/26/2025 Initial release 
 //
 //////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////
@@ -44,6 +50,7 @@ var EXPORT_FROM_STAGE = true;
 var CREATE_FOLDER_FILENAME = true;
 var CREATE_FOLDER_SCENE = false;
 var CREATE_FOLDER_SYMBOL = true;
+var TRIM_LIBRARY_FOLDERS_FOR_FILENAME = true;
 
 // Set this to an empty string to not export to a single subfolder
 var SPRITES_SUBFOLDER = "Exported sprites/"
@@ -224,6 +231,7 @@ SymbolStructureType.prototype.setSymbolChild = function(symbolName, childName)
 SymbolStructureType.prototype.getSymbolHasChildWithLayer = function(symbolName, layerName)
 {
     retVal = this.getSymbol(symbolName).childLayer[stringToHash(layerName)];
+    //debugTrace("getSymbolHasChildWithLayer('" + symbolName + "', '" + layerName + "'): " + retVal, 10);
     return (retVal || false); // This will return false if retVal is undefined
 }
 
@@ -232,6 +240,7 @@ SymbolStructureType.prototype.getSymbolHasChildWithLayer = function(symbolName, 
 
 SymbolStructureType.prototype.setSymbolHasChildWithLayer = function(symbolName, layerName)
 {
+    //debugTrace("setSymbolHasChildWithLayer('" + symbolName + "', '" + layerName + "')", 10);
     this.getSymbol(symbolName).childLayer[stringToHash(layerName)] = true;
 }
 
@@ -240,6 +249,7 @@ SymbolStructureType.prototype.setSymbolHasChildWithLayer = function(symbolName, 
 
 SymbolStructureType.prototype.setSymbolLayerHasChild = function(symbolName, layerNum, layerName, childName)
 {
+    debugTrace("setSymbolLayerHasChild('" + symbolName + "', '" + layerNum + "', '" + layerName + "', '" + childName + "')", 10);
     this.setSymbolChild(symbolName, childName); // Set that this child is in this symbol
     this.initSymbolLayer(symbolName,layerNum, layerName)
     this.getSymbol(symbolName).layer[layerNum].hasChild[stringToHash(childName)] = true; // Set that this symbol has childName on layerNum
@@ -251,7 +261,9 @@ SymbolStructureType.prototype.setSymbolLayerHasChild = function(symbolName, laye
 SymbolStructureType.prototype.getSymbolLayerHasChild = function(symbolName, layerNum, layerName, childName)
 {
     this.initSymbolLayer(symbolName, layerNum, layerName);
-    return this.getSymbolLayer(symbolName, layerNum).hasChild[stringToHash(childName)];
+    var retVal = this.getSymbolLayer(symbolName, layerNum).hasChild[stringToHash(childName)]
+    debugTrace("setSymbolLayerHasChild('" + symbolName + "', '" + layerNum + "', '" + layerName + "', '" + childName + "') = ", 10);
+    return retVal;
 }
 
 //------------------------------------------
@@ -259,6 +271,7 @@ SymbolStructureType.prototype.getSymbolLayerHasChild = function(symbolName, laye
 
 SymbolStructureType.prototype.setSymbolLayerHasChildWithLayer = function(symbolName, layerNum, layerName, childName, childLayerName)
 {
+    debugTrace("setSymbolLayerHasChildWithLayer('" + symbolName + "', '" + layerNum + "', '" + layerName + "', '" + childName + "', '" + childLayerName + "')", 10);
     this.setSymbolChild(symbolName, childName); // Set that this child is in this symbol
     this.initSymbolLayer(symbolName, layerNum, layerName);
     this.getSymbolLayer(symbolName, layerNum).hasChildWithLayer[stringToHash(childLayerName)] = true;
@@ -269,6 +282,7 @@ SymbolStructureType.prototype.setSymbolLayerHasChildWithLayer = function(symbolN
 
 SymbolStructureType.prototype.getSymbolLayerHasChildWithLayer = function(symbolName, layerNum, childLayerName)
 {
+    debugTrace("getSymbolLayerHasChildWithLayer('" + symbolName + "', '" + layerNum + "', '" + childLayerName + "')", 10);
     return this.getSymbolLayer(symbolName, layerNum).hasChildWithLayer[stringToHash(childLayerName)];
 }
 
@@ -538,7 +552,7 @@ getVisibleSymbols = function(timeline)
                             symbolHash[symbolHashKey] = [];
                         }
                         // Record that that symbol appears on this layer in this symbol
-                        symbolStructure.setSymbolLayerHasChild(timeline.name, lay, layers[lay].name, elements[el].libraryItem.name);
+                        symbolStructure.setSymbolLayerHasChild(timeline.libraryItem.name, lay, layers[lay].name, elements[el].libraryItem.name);
                         symbolHash[symbolHashKey][lay] = true;
                     }
                 }
@@ -773,7 +787,7 @@ exportLayers = function(libItem, layers, visibleLayerTimelineIdx, symbolLayerNam
     
     debugTrace("-----------exportLayers: There are " + visibleLayers.length + " visible layers", 2);
     
-    debugTrace("-=-=-=-=-=-=-=-=-=-= exportLayers: guiding out all layers in " + timeline.name, 2);
+    debugTrace("-=-=-=-=-=-=-=-=-=-= exportLayers: guiding out all layers in " + timeline.libraryItem.name, 10);
 
     for(i = 0; i < visibleLayers.length; i++)
     {
@@ -781,8 +795,9 @@ exportLayers = function(libItem, layers, visibleLayerTimelineIdx, symbolLayerNam
         debugTrace("-----------exportLayers: This layer is " + visibleLayers[i].name, 6);
         debugTrace("-----------exportLayers: This layer's index is " + visibleLayerTimelineIdx[i], 6);
         debugTrace("-----------exportLayers: symbolLayerName is " + symbolLayerName, 6);
-        debugTrace("-----------exportLayers: symbolStructure.getSymbolHasChildWithLayer('" + libItem.name + "', " + visibleLayerTimelineIdx[i] + ", '" + symbolLayerName + "') is " +
-                    symbolStructure.getSymbolLayerHasChildWithLayer(libItem.name, visibleLayerTimelineIdx[i], symbolLayerName), 6);
+        debugTrace("-----------exportLayers: symbolStructure.getSymbolLayerHasChildWithLayer('" + libItem.name + "', " + 
+                    visibleLayerTimelineIdx[i] + ", '" + symbolLayerName + "') is " +
+                    symbolStructure.getSymbolLayerHasChildWithLayer(libItem.name, visibleLayerTimelineIdx[i], symbolLayerName), 10);
         
         if(symbolLayerName === "" || symbolStructure.getSymbolLayerHasChildWithLayer(libItem.name, visibleLayerTimelineIdx[i], symbolLayerName))
         {
@@ -844,16 +859,27 @@ exportLayers = function(libItem, layers, visibleLayerTimelineIdx, symbolLayerNam
                         FLfile.createFolder(saveFolder);
 
                     var folderExists = FLfile.exists(saveFolder);
+                    
+                    var filesafeLibItemName;
+                    if(TRIM_LIBRARY_FOLDERS_FOR_FILENAME)
+                        filesafeLibItemName = libItem.name.slice(libItem.name.lastIndexOf("/") + 1)
+                    else
+                        filesafeLibItemName = stringToFileSafe(libItem.name);
+                    
+                    debugTrace("filesafe libItem name: " + filesafeLibItemName, 9);
 
                     sse.addSymbol(libItem, 0, libItem.timeline.frameCount);
                     
                     var exportFile;
                     if(folderExists)
-                        exportFile = saveFolder + libItem.name + "_" + layerName;
+                    {
+                        debugTrace("Folder already exists: " + saveFolder, 9);
+                        exportFile = saveFolder + filesafeLibItemName + "_" + layerName;
+                    }
                     else
                     {
-                        exportFile = docFolder + libItem.name + "_" + layerName;
-                        trace("Warning: couldn't create folder " + saveFolder + ". Exporting to " + docFolder + " instead.");
+                        exportFile = docFolder + filesafeLibItemName + "_" + layerName;
+                        debugTrace("Warning: couldn't create folder " + saveFolder + ". Exporting to " + docFolder + " instead.", 9);
                     }
                     
                     if(symbolLayerName)
@@ -867,7 +893,7 @@ exportLayers = function(libItem, layers, visibleLayerTimelineIdx, symbolLayerNam
                     var exportFormat = {format: "png", backgroundColor: "#00000000", bitDepth: 32};
 
                     debugTrace("-----------exportLayers: Exporting to: " + exportFile + ".png", 5);
-                    debugAlert("About to export " + libItem.name + " on symbol " + layerName + " with isolated layer " + symbolLayerName, 5);
+                    debugAlert("About to export " + filesafeLibItemName + " on symbol " + layerName + " with isolated layer " + symbolLayerName, 5);
                     timer.mark(libItem.name + ": Exporting sublayer " + exportFile);
                     sse.exportSpriteSheet(exportFile, exportFormat, true);
                     timer.mark(libItem.name + ": Exported sublayer " + exportFile);
@@ -883,6 +909,7 @@ exportLayers = function(libItem, layers, visibleLayerTimelineIdx, symbolLayerNam
                     debugTrace("-----------exportLayers: 6 visibleLayers lenght " + visibleLayers.length + " visible layers",2);
                 } catch(e) {
                     fl.trace("Error in exportDocument: " + e.toString());
+                    fl.trace("We were trying to export to " + exportFile);
                     return false;
                 }      
             }
@@ -992,7 +1019,7 @@ getSymbolLayerNames = function(symbols, mainSymbol)
                         debugTrace("getSymbolLayerNames: symbolStructure.getSymbolLayerHasChild('" + 
                             mainSymbol.name + "', " + mainLayer + ", '" + mainLayers[mainLayer].name + 
                             "', '" + symbols[i].name + "') is " + 
-                            symbolStructure.getSymbolLayerHasChild(mainSymbol.name, mainLayer, mainLayers[mainLayer].name, symbols[i].name), 6);
+                            symbolStructure.getSymbolLayerHasChild(mainSymbol.name, mainLayer, mainLayers[mainLayer].name, symbols[i].name), 10);
                         if(symbolStructure.getSymbolLayerHasChild(mainSymbol.name, mainLayer, mainLayers[mainLayer].name, symbols[i].name))
                             symbolStructure.setSymbolLayerHasChildWithLayer(mainSymbol.name, mainLayer, mainLayers[mainLayer].name, symbols[i].name, layers[lay].name);
                     }
