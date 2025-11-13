@@ -1,0 +1,28 @@
+/**
+ * Parses a formatted string into direction, animation state, and body part.
+ * @param {string} formattedString The input string (e.g., "N_RUN_LARM").
+ * @returns {object|null} An object containing the parts, or null if the format is incorrect.
+ */
+parseAnimationString = function(formattedString) 
+{
+	var parts = formattedString.split('_');
+
+	if (parts.length == 3) 
+	{
+
+		const[d, s, p] = parts;
+		
+		return info = {
+			direction: d,
+			animationstate: s,
+			bodypart: p
+		};
+	} 
+	else 
+	{
+		fl.outputPanel.trace("Invalid string format. Expected format: 'direction_animationstate_bodypart'");
+		console.error();
+		return null;
+	}
+}
+

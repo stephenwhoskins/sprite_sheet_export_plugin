@@ -35,6 +35,8 @@
 // Load helper libraries
 fl.runScript( fl.configURI + "Commands/auto tween.include");
 fl.runScript( fl.configURI + "Commands/Zero Transform.include");
+fl.runScript( fl.configURI + "Commands/parseAnimationString.include");
+
 
 // Set this to different values to get different sets of debug messages
 // Set it to 0 for no debug messages
@@ -49,7 +51,7 @@ var EXPORT_FROM_STAGE = true;
 // Constants to define whether folders should be created based on filename, scene name, and symbol name
 var CREATE_FOLDER_FILENAME = true;
 var CREATE_FOLDER_SCENE = false;
-var CREATE_FOLDER_SYMBOL = true;
+var CREATE_FOLDER_SYMBOL = false;
 var TRIM_LIBRARY_FOLDERS_FOR_FILENAME = true;
 
 // Set this to an empty string to not export to a single subfolder
@@ -843,6 +845,7 @@ exportLayers = function(libItem, layers, visibleLayerTimelineIdx, symbolLayerNam
                     sse.beginExport();
                     var docFolder = doc.pathURI.slice(0, doc.pathURI.lastIndexOf("/") + 1);
                     var saveFolder = docFolder + SPRITES_SUBFOLDER;
+					
                     
                     if(CREATE_FOLDER_FILENAME)
                         // Add the Flash file's base name as a folder
@@ -858,6 +861,12 @@ exportLayers = function(libItem, layers, visibleLayerTimelineIdx, symbolLayerNam
                     if(CREATE_FOLDER_FILENAME || CREATE_FOLDER_SCENE || CREATE_FOLDER_SYMBOL)
                         FLfile.createFolder(saveFolder);
 
+
+					
+					
+
+
+
                     var folderExists = FLfile.exists(saveFolder);
                     
                     var filesafeLibItemName;
@@ -867,23 +876,51 @@ exportLayers = function(libItem, layers, visibleLayerTimelineIdx, symbolLayerNam
                         filesafeLibItemName = stringToFileSafe(libItem.name);
                     
                     debugTrace("filesafe libItem name: " + filesafeLibItemName, 9);
+					
+					
+					// Start of Josh Added Section	
+					const animationDetails = parseAnimationString(filesafeLibItemName + "_" + layerName);
+					if (animationDetails) 
+					{
+					  trace("Direction: " + animationDetails.direction);
+					  trace("Animation State: " + animationDetails.animationstate);
+					  trace("Body Part: " + animationDetails.bodypart);
+					}
+					
+					var saveFolder2 = saveFolder;
+					saveFolder2 += animationDetails.bodypart + "/"
+					saveFolder2 += animationDetails.animationstate + "/"
+					saveFolder2 += animationDetails.direction + "/"
+					
+					
+					
+					trace("saveFolder2: " + saveFolder2);
+					FLfile.createFolder(saveFolder2);
+					
+					exportFile = saveFolder2 + "spritesheet"
+					
+					
+					// End of Josh Added Section
 
                     sse.addSymbol(libItem, 0, libItem.timeline.frameCount);
                     
-                    var exportFile;
-                    if(folderExists)
-                    {
-                        debugTrace("Folder already exists: " + saveFolder, 9);
-                        exportFile = saveFolder + filesafeLibItemName + "_" + layerName;
-                    }
-                    else
-                    {
-                        exportFile = docFolder + filesafeLibItemName + "_" + layerName;
-                        debugTrace("Warning: couldn't create folder " + saveFolder + ". Exporting to " + docFolder + " instead.", 9);
-                    }
+                   // var exportFile;
+                   // if(folderExists)
+                   // {
+                   //     debugTrace("Folder already exists: " + saveFolder, 9);
+                   //     exportFile = saveFolder + filesafeLibItemName + "_" + layerName;
+                   // }
+                   // else
+                   // {
+                   //     exportFile = docFolder + filesafeLibItemName + "_" + layerName;
+                   //     debugTrace("Warning: couldn't create folder " + saveFolder + ". Exporting to " + docFolder + " instead.", 9);
+                   // }
                     
-                    if(symbolLayerName)
-                        exportFile += "_" + symbolLayerName;
+                   // if(symbolLayerName)
+                   //     exportFile += "_" + symbolLayerName;
+						
+						
+
 
                     debugTrace("-----------exportLayers: 4 visibleLayers lenght " + visibleLayers.length + " visible layers",2);
 
