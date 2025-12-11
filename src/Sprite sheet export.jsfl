@@ -522,7 +522,7 @@ isolateLayer = function(symbol, isolateLayerName, originalLayerStatus)
 }
 
 //------------------------------------------
-// Find all the symbols that are visible (that is, not in guide or mask layers) on the current timeline
+// Find all the symbols that are visible (that is, not in guide or mask layers or name isn't all upper) on the current timeline
 
 getVisibleSymbols = function(timeline)
 {
@@ -534,8 +534,13 @@ getVisibleSymbols = function(timeline)
     for(var lay = 0; lay < layers.length; lay++)
     {
         // Only find the symbol instances in this layer if the layer is visible when exported
-        if(layers[lay].layerType !== "guide" && layers[lay].layerType !== "folder" && layers[lay].layerType !== "mask")
+        if(layers[lay].layerType !== "guide" 
+			&& layers[lay].layerType !== "folder" 
+			&& layers[lay].layerType !== "mask"
+			&& layers[lay].name === layers[lay].name.toUpperCase())
         {
+		
+			trace("layers[lay].name: " + layers[lay].name);
             var frames = layers[lay].frames;
             var fr = 0;
             while(fr < layers[lay].frameCount)
@@ -743,6 +748,7 @@ exportLayers = function(libItem, layers, visibleLayerTimelineIdx, symbolLayerNam
         if(layers[lay].layerType !== "guide" && 
 			layers[lay].layerType !== "mask" && 
 			layers[lay].layerType !== "folder" && 
+			layers[lay].name === layers[lay].name.toUpperCase() &&
 			layers[lay].name.slice(-CONSTANT_SUFFIX.length) !== CONSTANT_SUFFIX &&
                 layers[lay].name.slice(0, IGNORE_PREFIX.length) !== IGNORE_PREFIX)
         {
@@ -882,9 +888,10 @@ exportLayers = function(libItem, layers, visibleLayerTimelineIdx, symbolLayerNam
 					const animationDetails = parseAnimationString(filesafeLibItemName + "_" + layerName);
 					if (animationDetails) 
 					{
-					  trace("Direction: " + animationDetails.direction);
-					  trace("Animation State: " + animationDetails.animationstate);
-					  trace("Body Part: " + animationDetails.bodypart);
+					  //trace("Direction: " + animationDetails.direction);
+					  //trace("Animation State: " + animationDetails.animationstate);
+					  //trace("Body Part: " + animationDetails.bodypart);
+					  //trace("Part Type: " + animationDetails.parttype);
 					}
 					
 					var saveFolder2 = saveFolder;
@@ -894,10 +901,11 @@ exportLayers = function(libItem, layers, visibleLayerTimelineIdx, symbolLayerNam
 					
 					
 					
-					trace("saveFolder2: " + saveFolder2);
+					//trace("saveFolder2: " + saveFolder2);
 					FLfile.createFolder(saveFolder2);
 					
-					exportFile = saveFolder2 + "spritesheet"
+					//exportFile = saveFolder2 + "spritesheet"
+					exportFile = saveFolder2 + animationDetails.parttype
 					
 					
 					// End of Josh Added Section
