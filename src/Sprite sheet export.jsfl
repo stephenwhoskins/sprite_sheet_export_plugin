@@ -2,9 +2,9 @@
 //////////////////////////////////////////////////////////////////////////////////////////////
 //
 //  Sprite Sheet Exporter
-//  v1.2
+//  v1.3
 //  By David Hernston
-//  Last modified September 27 2025
+//  Last modified 12:21 PM Friday, January 30, 2026
 //
 //  Exports separate sprite sheets for each layer in a symbol, with the option of
 //  exporting layers in sub-symbols separately (for instance, to export lines and 
@@ -25,6 +25,7 @@
 //
 //  REVISIONS
 //
+//  1.3     1/30/2026 Changed the persistent layer name suffix to "Green" to fit existing FLA layer naming conventions
 //  1.2     9/27/2025 Removed some extraneous debugging output
 //  1.1     9/27/2025 Fixed a bug that broke exports when symbols were in folders in the library
 //  1       9/26/2025 Initial release 
@@ -61,7 +62,7 @@ var DOC_DATA_LAYER_NAME = "spriteExportLayerName";
 var DOC_DATA_SCALE      = "spriteExportScale";
 
 var LAYER_ASSIGNMENT_UNINITIALIZED = -1;
-var CONSTANT_SUFFIX = "_CONST";
+var CONSTANT_SUFFIX = "Green";                // NOTE: Modified to fit existing layer name conventions
 var HASH_PREFIX = "HASH_";
 var DIALOG_ID_PREFIX = "ID_";
 var IGNORE_PREFIX = "X_";
@@ -300,6 +301,9 @@ function createSymbolExportDialog(librarySymbols)
         var dialogString = FLfile.read(DIALOG_XML_FILENAME);
         if(dialogString)
             dialog = new XML(dialogString);
+        
+        // Empty out the description so we can include the most up to date version
+        dialog.vbox[0] = <vbox/>;
     }
     if(!dialog)
     {
@@ -322,12 +326,14 @@ function createSymbolExportDialog(librarySymbols)
                 <label value="Symbols to export:" />
                 <vbox></vbox>
             </dialog>;
-    
-        dialog.vbox[0].appendChild(<label value={DIALOG_EXPLANATORY_TEXT[0]}/>)
-        dialog.vbox[0].appendChild(<separator />)
-        for(var i = 1; i < DIALOG_EXPLANATORY_TEXT.length; i++)
-            dialog.vbox[0].appendChild(<label value={DIALOG_EXPLANATORY_TEXT[i]}/>)
-    }
+     }
+
+    dialog.vbox[0].appendChild(<label value={DIALOG_EXPLANATORY_TEXT[0]}/>)
+    dialog.vbox[0].appendChild(<separator />)
+    for(var i = 1; i < DIALOG_EXPLANATORY_TEXT.length; i++)
+        dialog.vbox[0].appendChild(<label value={DIALOG_EXPLANATORY_TEXT[i]}/>)
+
+
     // Add checkboxes for each library symbol
     // First, make sure it's empty. It's going to replace the one that's already there.
     var symbolListNode = dialog.vbox[1] = <vbox/>;
@@ -738,6 +744,9 @@ exportLayers = function(libItem, layers, visibleLayerTimelineIdx, symbolLayerNam
     // Fill out visibleLayers and layerAssignments
     for(lay = 0; lay < layers.length; lay++)
     {
+        if(layers[lay].name.slice(-CONSTANT_SUFFIX.length) == CONSTANT_SUFFIX)
+            debugTrace("Found a constant layer in " + libItem.name + ": " + layers[lay].name, 20);
+        
         if(layers[lay].layerType !== "guide" && 
 			layers[lay].layerType !== "mask" && 
 			layers[lay].layerType !== "folder" && 
