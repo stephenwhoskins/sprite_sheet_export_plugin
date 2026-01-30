@@ -4,13 +4,17 @@
 //
 // Programmed by David Hernston
 // http://blog.pinkandaint.com/
-// Last modified April 21 2016
+// Last modified January 30, 2026
 //
 // This is the include file for the Zero Transform commands.  To use,
 // include this file and call zero_transform() with optional parameters
 // to zero at a given scale (that is, the selected symbol instance will
 // be at the given scale, but visually be identical to its original 
 // position)
+//
+// v1.1     1/30/2026 Modified to allow saveLayerProperties to operate 
+//                    on not-the-current-timeline (for Sprite Exporter
+//                    plugin)
 //
 /////////////////////////////////////////////////////////////////////////
 
