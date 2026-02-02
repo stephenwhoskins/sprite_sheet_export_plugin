@@ -2,9 +2,9 @@
 //////////////////////////////////////////////////////////////////////////////////////////////
 //
 //  Sprite Sheet Exporter
-//  v1.3
+//  v1.4
 //  By David Hernston
-//  Last modified 12:21 PM Friday, January 30, 2026
+//  Last modified Feb 2, 2026
 //
 //  Exports separate sprite sheets for each layer in a symbol, with the option of
 //  exporting layers in sub-symbols separately (for instance, to export lines and 
@@ -25,6 +25,7 @@
 //
 //  REVISIONS
 //
+//  1.4     2/2/2026  Integrated the changes in 1.3 into the alternative_output branch
 //  1.3     1/30/2026 Changed the persistent layer name suffix to "Green" to fit existing FLA layer naming conventions
 //  1.2     9/27/2025 Removed some extraneous debugging output
 //  1.1     9/27/2025 Fixed a bug that broke exports when symbols were in folders in the library
